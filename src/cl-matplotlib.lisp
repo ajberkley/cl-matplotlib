@@ -1,5 +1,6 @@
 (defpackage :cl-matplotlib
   (:use :common-lisp :py4cl2)
+  (:import-from :lparallel)
   (:export
    #:install-python-packages
    #:initialize))
@@ -26,10 +27,12 @@
     (show)))
 
 (defun try-interactive-plot ()
+  (unless lparallel:*kernel*
+    (setf lparallel:*kernel* (lparallel:make-kernel 8)))
   (initialize)
   (py4cl2:pyexec "from src import test_interactive_plot as test")
   ;;(py4cl2:with-remote-objects
   (let ((plt (py4cl2:pyeval "test.testPlot()")))
     (py4cl2:pycall "test.testPlot.load_config" plt "src/config.yaml")
     (py4cl2:pycall "test.testPlot.generate_data" plt)
-    (py4cl2:pycall "test.testPlot.make_plot" plt)))
+    (lparallel:future (py4cl2:pycall "test.testPlot.make_plot" plt))))

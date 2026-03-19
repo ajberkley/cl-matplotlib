@@ -6,6 +6,7 @@
   :pathname "src/"
   :depends-on (#:py4cl2
 	       #:alexandria
+               #:lparallel
 	       )
   :components ((:file "cl-matplotlib"))
   :license :BSD-3
