@@ -35,4 +35,4 @@
   (let ((plt (py4cl2:pyeval "test.testPlot()")))
     (py4cl2:pycall "test.testPlot.load_config" plt "src/config.yaml")
     (py4cl2:pycall "test.testPlot.generate_data" plt)
-    (lparallel:future (py4cl2:pycall "test.testPlot.make_plot" plt))))
+    (values plt (lparallel:future (py4cl2:pycall "test.testPlot.make_plot" plt nil)))))

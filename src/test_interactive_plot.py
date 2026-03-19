@@ -174,7 +174,7 @@ class testPlot:
         self.ax.grid(linestyle='--')
         self.fig.canvas.draw_idle()
 
-    def make_plot(self):
+    def make_plot(self, block):
         # generate data points
         self.generate_data()
         # fit model to data
@@ -190,4 +190,5 @@ class testPlot:
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.fig.canvas.mpl_connect('key_release_event', self.on_key_release)
         self.redraw()
-        plt.show()
+        plt.show(block=block)
+        plt.pause(0.1)
