@@ -7,7 +7,7 @@
   :depends-on (#:py4cl2
 	       #:alexandria
 	       )
-  :components ()
+  :components ((:file "cl-matplotlib"))
   :license :BSD-3
   :in-order-to ((asdf:test-op (asdf:test-op :cl-matplotlib))))
 
