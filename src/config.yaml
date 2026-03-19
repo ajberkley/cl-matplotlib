@@ -1,0 +1,9 @@
+fig_subplots: [1, 1]
+fig_size: [8, 8]
+deg_pt: 0.5
+deg_wdt: .02
+outliers: 10
+meas_num: 125
+meas_std: .025
+fit_p0: [.1, .1, 1., 1.]
+fit_bounds: [[-2, -2, -2, -2], [2, 2, 2, 2]]
