@@ -12,27 +12,42 @@
   (uiop:run-program '("pip" "install" "scipy")))
 
 (defun initialize ()
+  ;; We override some behavior in the read-eval loop on the
+  ;; python side to play nice with matplotlib gui.
+  ;; This override only works on linux right now
+  (setf py4cl2::*python-code*
+        (alexandria:read-file-into-string
+         (asdf:component-pathname
+          (asdf:find-component :cl-matplotlib "python-code"))))
   (py4cl2:pyexec "import sys")
   (py4cl2:pyexec "sys.path.insert(0, '.')")
   (py4cl2:pyexec "import matplotlib.pyplot as plt")
   (py4cl2:pyexec "from src import test_interactive_plot"))
 
 (defpyfun "plot" "matplotlib.pyplot" :lisp-fun-name "PLOT")
-(defpyfun "show" "matplotlib.pyplot" :lisp-fun-name "SHOW")
+(defpyfun "show" "matplotlib.pyplot" :lisp-fun-name "SHOW&")
+
+(defun show ()
+  "Non-blocking show"
+  (show& :block nil))
 
 (defun do-something ()
   (let* ((time (loop for x from 0d0 below 1d0 by 0.1d0 collect x))
          (speed (mapcar (lambda (x) (* x x)) time)))
     (plot time speed ".-")
-    (show)))
+    (show :block nil)))
 
 (defun try-interactive-plot ()
   (unless lparallel:*kernel*
     (setf lparallel:*kernel* (lparallel:make-kernel 8)))
   (initialize)
   (py4cl2:pyexec "from src import test_interactive_plot as test")
-  ;;(py4cl2:with-remote-objects
   (let ((plt (py4cl2:pyeval "test.testPlot()")))
     (py4cl2:pycall "test.testPlot.load_config" plt "src/config.yaml")
     (py4cl2:pycall "test.testPlot.generate_data" plt)
-    (values plt (lparallel:future (py4cl2:pycall "test.testPlot.make_plot" plt nil)))))
+    (values plt (py4cl2:pycall "test.testPlot.make_plot" plt nil))))
+
+;; Callbacks, only called at the right point in the loop
+;; (defun blarg (x) (print x))
+;; (defparameter *myblarg* (py4cl2::pythonize #'blarg))
+;; (pyeval (format nil "~A(17 + 32)" *myblarg*))

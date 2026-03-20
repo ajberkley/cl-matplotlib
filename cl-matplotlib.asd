@@ -8,7 +8,8 @@
 	       #:alexandria
                #:lparallel
 	       )
-  :components ((:file "cl-matplotlib"))
+  :components ((:static-file "python-code" :pathname #P"py4cl-modified.py")
+               (:file "cl-matplotlib"))
   :license :BSD-3
   :in-order-to ((asdf:test-op (asdf:test-op :cl-matplotlib))))
 
