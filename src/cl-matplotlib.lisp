@@ -7,25 +7,44 @@
 
 (in-package :cl-matplotlib)
 
+;; We override some behavior in the read-eval loop on the
+;; python side to play nice with matplotlib gui.
+;; This override only works on linux right now
+
+(defun start-up ()
+  (pystop)
+  (setf py4cl2::*python-code*
+	(alexandria:read-file-into-string
+	 (asdf:component-pathname
+          (asdf:find-component :cl-matplotlib "python-code"))))  
+  (pystart)
+  (py4cl2:pyexec "import sys")
+  (py4cl2:pyexec "import matplotlib")
+  (py4cl2:pyexec (format nil "sys.path.insert(0, '~a')"
+			 (directory-namestring
+			  (asdf:component-pathname
+			   (asdf:find-component :cl-matplotlib "python-code"))))))
+
+(defun start-loop ()
+  (start-up)
+  (let ((stream (uiop:process-info-input py4cl2::*python*)))
+    (bt:with-recursive-lock-held (py4cl2::*python-lock*) ; wait for previous processing to be done
+      (py4cl2::write-char #\s stream)
+      (force-output stream))))
+
+
 (defun install-python-packages ()
   (uiop:run-program '("pip" "install" "matplotlib"))
   (uiop:run-program '("pip" "install" "scipy")))
 
 (defun initialize ()
-  ;; We override some behavior in the read-eval loop on the
-  ;; python side to play nice with matplotlib gui.
-  ;; This override only works on linux right now
-  (setf py4cl2::*python-code*
-        (alexandria:read-file-into-string
-         (asdf:component-pathname
-          (asdf:find-component :cl-matplotlib "python-code"))))
-  (py4cl2:pyexec "import sys")
-  (py4cl2:pyexec "sys.path.insert(0, '.')")
-  (py4cl2:pyexec "import matplotlib.pyplot as plt")
-  (py4cl2:pyexec "from src import test_interactive_plot"))
+  (py4cl2:pyexec "import src.test_interactive_plot")
+  (py4cl2:pyexec "import matplotlib; matplotlib.use('QtAgg')"))
+
 
 (defpyfun "plot" "matplotlib.pyplot" :lisp-fun-name "PLOT")
 (defpyfun "show" "matplotlib.pyplot" :lisp-fun-name "SHOW&")
+(defpyfun "figure" "matplotlib.pyplot" :lisp-fun-name "FIGURE")
 
 (defun show ()
   "Non-blocking show"
@@ -35,13 +54,11 @@
   (let* ((time (loop for x from 0d0 below 1d0 by 0.1d0 collect x))
          (speed (mapcar (lambda (x) (* x x)) time)))
     (plot time speed ".-")
-    (show :block nil)))
+    (show)))
 
 (defun try-interactive-plot ()
-  (unless lparallel:*kernel*
-    (setf lparallel:*kernel* (lparallel:make-kernel 8)))
   (initialize)
-  (py4cl2:pyexec "from src import test_interactive_plot as test")
+  (py4cl2:pyexec "import src.test_interactive_plot as test")
   (let ((plt (py4cl2:pyeval "test.testPlot()")))
     (py4cl2:pycall "test.testPlot.load_config" plt "src/config.yaml")
     (py4cl2:pycall "test.testPlot.generate_data" plt)

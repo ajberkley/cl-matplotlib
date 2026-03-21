@@ -1,6 +1,7 @@
 ## author: fbraglia
 import numpy as np
 import yaml
+import matplotlib
 from scipy.stats import logistic
 from scipy.optimize import curve_fit
 from matplotlib import pyplot as plt

@@ -18,7 +18,10 @@ import os
 import signal
 import traceback
 import threading
+
+import time
 import matplotlib.pyplot as plt
+import PyQt6
 
 numpy_is_installed = False
 try:
@@ -437,60 +440,94 @@ def pythonize(value): # assumes the symbol name is downcased by the lisp process
         """
         return str(value)[1:].replace("-", "_")
 
-def message_dispatch_loop():
+def start_it ():
+        #global w
+        #import PyQt6Dockable
+        #import matplotlib
+        # matplotlib.use("QtAgg") #module://PyQt6Dockable")
+        #w = PyQt6Dockable.MainWindow()
+        #w.show()
+
+        # Integrate ourselves into PyQt6
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import QTimer        
+        app = QApplication(sys.argv)
+        timer = QTimer()
+        def process_messages():
+                try_process_message(blocking=False)
+        timer.timeout.connect(process_messages);
+        timer.start(100);
+        print("Going into main loop, will return when all windows closed")
+        app.exec()
+        print("No more windows, returning to default messsage_dispatch_loop")
+
+#def new_figure (f, num):
+#        w.add_plot(w, f, num)
+
+#eval_globals["new_figure"] = new_figure
+        
+def message_dispatch_loop ():
+        global return_values  # Controls whether values or handles are returned
+        
+        while True:
+                try_process_message(blocking=True)
+
+def try_process_message (blocking=True):
         """
         Wait for a message, dispatch on the type of message.
         Message types are determined by the first character:
 
         e  Evaluate an expression (expects string)
         x  Execute a statement (expects string)
+        s  start the Py6Qt main loop and do not return until the main gui window is closed
+           further processing will be handled by the timer that calls this with blocking=False
+        O  enable handles
+        o  disable handles
         q  Quit
         """
-        global return_values  # Controls whether values or handles are returned
-        
-        while True:
-                try:
-                        output_stream.flush()
+        try:
+                output_stream.flush()
+                if not blocking:
                         os.set_blocking(sys.stdin.fileno(), False)
-                        cmd_type = sys.stdin.read(1)
-                        if cmd_type == "":
-                                plt.pause(0.02);
-                                continue;
-                        os.set_blocking(sys.stdin.fileno(), True)
-                        # Read command type
-                        # cmd_type = sys.stdin.read(1)
-                        # It is possible that python would have finished sending the data to CL
-                        # but CL would still not have finished processing. We will receive further
-                        # instructions only after CL has finished processing, and therefore we can delete
-                        # the arrays. (TODO: But how does this happen with callbacks?)
-                        if numpy_is_installed: delete_numpy_pickle_arrays()
-
-                        if cmd_type == "e":  # Evaluate an expression
-                                expr = recv_string()
-                                # if expr not in cache:
-                                # print("Adding " + expr + " to cache")
-                                # cache[expr] = eval("lambda : " + expr, eval_globals)
-                                # result = cache[expr]()
-                                result = eval(expr, eval_globals)
-                                return_value(result)
-                        elif cmd_type == "x": # Execute a statement
-                                exec(recv_string(), eval_globals)
-                                return_value(None)
-                        elif cmd_type == "q":
-                                exit(0)
-                        elif cmd_type == "r": # return value from lisp function
-                                return recv_value()
-                        elif cmd_type == "O":  # Return only handles
-                                return_values += 1
-                        elif cmd_type == "o":  # Return values when possible (default)
-                                return_values -= 1
-                        else:
-                                return_error("Unknown message type \"{0}\".".format(cmd_type))
-                except KeyboardInterrupt as e: # to catch SIGINT
-                        # output_stream.write("Python interrupted!\n")
+                # Read command type
+                cmd_type = sys.stdin.read(1)
+                if cmd_type == "":
+                        if not blocking:
+                                os.set_blocking(sys.stdin.fileno(), True)
+                        return(None)
+                # It is possible that python would have finished sending the data to CL
+                # but CL would still not have finished processing. We will receive further
+                # instructions only after CL has finished processing, and therefore we can delete
+                # the arrays. (TODO: But how does this happen with callbacks?)
+                if numpy_is_installed: delete_numpy_pickle_arrays()
+                if cmd_type == "e":  # Evaluate an expression
+                        expr = recv_string()
+                        # if expr not in cache:
+                        # print("Adding " + expr + " to cache")
+                        # cache[expr] = eval("lambda : " + expr, eval_globals)
+                        # result = cache[expr]()
+                        result = eval(expr, eval_globals)
+                        return_value(result)
+                elif cmd_type == "s":
+                        start_it();
+                elif cmd_type == "x": # Execute a statement
+                        exec(recv_string(), eval_globals)
                         return_value(None)
-                except Exception as e:
-                        return_error(e)
+                elif cmd_type == "q":
+                        exit(0)
+                elif cmd_type == "r": # return value from lisp function
+                        return recv_value()
+                elif cmd_type == "O":  # Return only handles
+                        return_values += 1
+                elif cmd_type == "o":  # Return values when possible (default)
+                        return_values -= 1
+                else:
+                        return_error("Unknown message type \"{0}\".".format(cmd_type))
+        except KeyboardInterrupt as e: # to catch SIGINT
+                # output_stream.write("Python interrupted!\n")
+                return_value(None)
+        except Exception as e:
+                return_error(e)
 
 # Store for python objects which cannot be translated to Lisp objects
 python_objects = {}
