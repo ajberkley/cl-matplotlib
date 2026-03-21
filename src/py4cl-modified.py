@@ -439,18 +439,20 @@ def pythonize(value): # assumes the symbol name is downcased by the lisp process
         return str(value)[1:].replace("-", "_")
 
 def start_it ():
-        #global w
-        #import PyQt6Dockable
-        #import matplotlib
-        # matplotlib.use("QtAgg") #module://PyQt6Dockable")
-        #w = PyQt6Dockable.MainWindow()
-        #w.show()
-
+        global w
         # Integrate ourselves into PyQt6
         import PyQt6
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtCore import QTimer        
         app = QApplication(sys.argv)
+
+        import PyQt6Dockable
+        import matplotlib
+        matplotlib.use("module://PyQt6Dockable")
+        w = PyQt6Dockable.MainWindow()
+        w.show()
+        PyQt6Dockable.blarg(w)
+
         timer = QTimer()
         def process_messages():
                 try_process_message(blocking=False)
@@ -460,10 +462,10 @@ def start_it ():
         app.exec()
         print("No more windows, returning to default messsage_dispatch_loop")
 
-#def new_figure (f, num):
-#        w.add_plot(w, f, num)
+def new_figure (f, num):
+       w.add_plot(f, num)
 
-#eval_globals["new_figure"] = new_figure
+eval_globals["new_figure"] = new_figure
         
 def message_dispatch_loop ():
         global return_values  # Controls whether values or handles are returned

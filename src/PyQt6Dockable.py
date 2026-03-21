@@ -1,6 +1,8 @@
 import PyQt6
 from PyQt6.QtWidgets import QMainWindow, QDockWidget, QApplication
 from PyQt6.QtCore import QCoreApplication, QTimer
+import PyQt6.QtCore as QtCore
+import sys
 
 class MainWindow(QMainWindow):
         def __init__(self):
@@ -10,25 +12,25 @@ class MainWindow(QMainWindow):
                 # self.items = QDockWidget("Dockable",self);
                 # docked.setAllowedAreas(LeftDockWidgetArea | RightDockWidgetArea)
 
-        def add_plot(self, w, figure, num):
-            self.items += FigureManagerQTDock(figure, num, w);
+        def add_plot(self, figure, num):
+            self.items += FigureManagerQTDock(figure, num);
 
-import matplotlib                
+import matplotlib
 from matplotlib.backends.backend_qt import FigureManagerQT
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
+def blarg(main_window):
+        global w
+        w = main_window
+        
 class FigureManagerQTDock(FigureManagerQT):
-    def __init__(self, canvas, num, w):
+    def __init__(self, canvas, num):
+        global w
         self.window = QDockWidget("Dockable", w)
         self.canvas = canvas
         super().__init__(canvas, num)
         self.window.closing.connect(self._widgetclosed)
-
-        if sys.platform != "darwin":
-            image = str(cbook._get_data_path('images/matplotlib.svg'))
-            icon = QtGui.QIcon(image)
-            self.window.setWindowIcon(icon)
 
         self.window._destroying = False
 
@@ -47,7 +49,7 @@ class FigureManagerQTDock(FigureManagerQT):
 
         self.window.setCentralWidget(self.canvas)
 
-        if mpl.is_interactive():
+        if matplotlib.is_interactive():
             self.window.show()
             self.canvas.draw_idle()
 
@@ -62,7 +64,7 @@ class FigureManagerQTDock(FigureManagerQT):
 
 # This class is an entry point to the backend. It's methods are called by matplotlib if the current module is used as a backend.
 class FigureCanvas(FigureCanvasQTAgg):
-    required_interactive_framework = "qt6"
+    required_interactive_framework = "qt"
     FigureCanvas = FigureCanvasQTAgg
     FigureManager = FigureManagerQTDock
 

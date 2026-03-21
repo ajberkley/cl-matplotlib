@@ -30,7 +30,7 @@
           (asdf:find-component :cl-matplotlib "python-code"))))  
   (pystart)
   (py4cl2:pyexec "import sys")
-  (py4cl2:pyexec "import matplotlib; matplotlib.use('QtAgg');")
+  (py4cl2:pyexec "import matplotlib; matplotlib.use('module://mpldock.backend');")
   (py4cl2:pyexec (format nil "sys.path.insert(0, '~a')"
 			 (directory-namestring
 			  (asdf:component-pathname
