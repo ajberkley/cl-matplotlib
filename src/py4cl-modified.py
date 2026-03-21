@@ -20,8 +20,6 @@ import traceback
 import threading
 
 import time
-import matplotlib.pyplot as plt
-import PyQt6
 
 numpy_is_installed = False
 try:
@@ -449,6 +447,7 @@ def start_it ():
         #w.show()
 
         # Integrate ourselves into PyQt6
+        import PyQt6
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtCore import QTimer        
         app = QApplication(sys.argv)
