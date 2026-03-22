@@ -11,30 +11,30 @@
 ;;  matplotlib
 ;;  scipy
 ;;  PyQt6
+;; Best in a virtual environment
+
+(defun start-up/internal ()
+  (pystop)
+  ;; Changes to py4cl2 to support inverted control loop
+  (setf py4cl2::*python-code*
+	(alexandria:read-file-into-string
+	 (asdf:component-pathname
+          (asdf:find-component :cl-matplotlib "python-code"))))  
+  (pystart)
+  (py4cl2:pyexec (format nil "sys.path.insert(0, '~a')"
+			 (directory-namestring
+			  (asdf:component-pathname
+			   (asdf:find-component :cl-matplotlib "python-code"))))))
 
 (defun start-loop ()
   "Call this to start the main gui loop, then try calilng try-interactive-plot"
   (start-up/internal)
   (let ((stream (uiop:process-info-input py4cl2::*python*)))
     (bt:with-recursive-lock-held (py4cl2::*python-lock*) ; wait for previous processing to be done
-      (py4cl2::write-char #\s stream)
+      ;; Never returns
+      (py4cl2::write-char #\x stream)
+      (py4cl2::stream-write-string "import PyQt6_example; PyQt6_example.start_app(try_process_message);" stream)
       (force-output stream))))
-
-(defun start-up/internal ()
-  (pystop)
-  ;; Our bespoke dispatch loop and inverted dispatch loop called from a
-  ;; Qt6 timer.
-  (setf py4cl2::*python-code*
-	(alexandria:read-file-into-string
-	 (asdf:component-pathname
-          (asdf:find-component :cl-matplotlib "python-code"))))  
-  (pystart)
-  (py4cl2:pyexec "import sys")
-  (py4cl2:pyexec "import matplotlib; matplotlib.use('module://mpldock.backend');")
-  (py4cl2:pyexec (format nil "sys.path.insert(0, '~a')"
-			 (directory-namestring
-			  (asdf:component-pathname
-			   (asdf:find-component :cl-matplotlib "python-code"))))))
 
 (defpyfun "plot" "matplotlib.pyplot" :lisp-fun-name "PLOT")
 (defpyfun "show" "matplotlib.pyplot" :lisp-fun-name "SHOW&")

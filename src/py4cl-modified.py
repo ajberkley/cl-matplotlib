@@ -437,35 +437,6 @@ def pythonize(value): # assumes the symbol name is downcased by the lisp process
         In particular, replaces "-" with "_"
         """
         return str(value)[1:].replace("-", "_")
-
-def start_it ():
-        global w
-        # Integrate ourselves into PyQt6
-        import PyQt6
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtCore import QTimer        
-        app = QApplication(sys.argv)
-
-        import PyQt6Dockable
-        import matplotlib
-        matplotlib.use("module://PyQt6Dockable")
-        w = PyQt6Dockable.MainWindow()
-        w.show()
-        PyQt6Dockable.blarg(w)
-
-        timer = QTimer()
-        def process_messages():
-                try_process_message(blocking=False)
-        timer.timeout.connect(process_messages);
-        timer.start(100);
-        print("Going into main loop, will return when all windows closed")
-        app.exec()
-        print("No more windows, returning to default messsage_dispatch_loop")
-
-def new_figure (f, num):
-       w.add_plot(f, num)
-
-eval_globals["new_figure"] = new_figure
         
 def message_dispatch_loop ():
         global return_values  # Controls whether values or handles are returned
@@ -480,8 +451,6 @@ def try_process_message (blocking=True):
 
         e  Evaluate an expression (expects string)
         x  Execute a statement (expects string)
-        s  start the Py6Qt main loop and do not return until the main gui window is closed
-           further processing will be handled by the timer that calls this with blocking=False
         O  enable handles
         o  disable handles
         q  Quit
@@ -509,8 +478,6 @@ def try_process_message (blocking=True):
                         # result = cache[expr]()
                         result = eval(expr, eval_globals)
                         return_value(result)
-                elif cmd_type == "s":
-                        start_it();
                 elif cmd_type == "x": # Execute a statement
                         exec(recv_string(), eval_globals)
                         return_value(None)
@@ -534,6 +501,8 @@ def try_process_message (blocking=True):
 python_objects = {}
 python_handle = itertools.count(0)
 
+# For user to use to give time to our dispatch loop
+eval_globals["try_process_message"] = try_process_message
 # Make callback function accessible to evaluation
 eval_globals["_py4cl_LispCallbackObject"] = LispCallbackObject
 eval_globals["_py4cl_Symbol"] = Symbol

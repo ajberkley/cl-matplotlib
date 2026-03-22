@@ -26,6 +26,7 @@ def blarg(main_window):
         
 class FigureManagerQTDock(FigureManagerQT):
     def __init__(self, canvas, num):
+        print("Hi making figuremanagerqtdock")
         global w
         self.window = QDockWidget("Dockable", w)
         self.canvas = canvas
@@ -70,10 +71,12 @@ class FigureCanvas(FigureCanvasQTAgg):
 
     def __init__(self, figure: Figure):
         super().__init__(figure)
+        print("Hi, making figure canvas")
         self.figure = figure
 
     @classmethod
     def new_manager(cls, figure, num):
+        print("hi making new manager")
         canvas = FigureCanvas(figure)
         manager = FigureManagerQTDock(canvas, num)
         canvas.manager = manager
