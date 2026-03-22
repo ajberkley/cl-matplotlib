@@ -44,6 +44,30 @@ Passes strings as they are, without any 'pythonize'ation."
 			  (asdf:component-pathname
 			   (asdf:find-component :cl-matplotlib "python-code"))))))
 
+(py4cl2:defpymodule "matplotlib.widgets" nil :lisp-package "WID")
+(py4cl2:defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
+(py4cl2:defpymodule "matplotlib" nil :lisp-package "MPL")
+
+(defun draw (&rest rest)
+  (print rest))
+  ;; (py4cl2:pymethod ax "plot"
+  ;; 		   (loop repeat 3 collect (random 10))
+  ;; 		   (loop repeat 3 collect (random 10)))
+
+
+(defun try-callbacks ()
+  ;; Does not work, even if we poll with pyeval ...
+  ;; experiment more with callbacks.  need to implement
+  ;; asynchronous callbacks into lisp for this to work
+  (pyexec "import matplotlib")
+  (destructuring-bind (fig ax)
+      (plt::subplots)
+    (declare (ignorable fig))
+    (py4cl2:pymethod ax "plot" '(1 2 3) '(3 2 1))
+    (let ((button (pycall "matplotlib.widgets.Button" ax "boo")))
+      (py4cl2:pymethod button "on_clicked" (alexandria:curry 'draw ax)))
+    (plt::show :block nil)))
+
 (defun start-loop ()
   "Call this to start the main gui loop"
   (start-up/internal)
