@@ -26,9 +26,9 @@
 			  (asdf:component-pathname
 			   (asdf:find-component :cl-matplotlib "python-code"))))))
 
-(py4cl2:defpymodule "matplotlib.widgets" nil :lisp-package "WID")
+;; (py4cl2:defpymodule "matplotlib.widgets" nil :lisp-package "WID")
 ;; (py4cl2:defpymodule "matplotlib.pyplot" nil :lisp-package "PLT") ;; too slow!
-(py4cl2:defpymodule "matplotlib" nil :lisp-package "MPL")
+;; (py4cl2:defpymodule "matplotlib" nil :lisp-package "MPL")
 
 (defun draw (&rest rest)
   (print rest))
@@ -51,6 +51,9 @@
   "Call this to start the main gui loop"
   (start-up/internal)
   (py4cl2::raw-py-exec/no-return "import PyQt6_example; PyQt6_example.start_app(try_process_message);")
+  ;; Verify that the system is OK.
+  (py4cl2:pyeval "1 + 1")
+  ;; The above will throw an error if the no-return statement did not succeed
   (setf *loop-started* t))
 
 (defun try-interactive-plot ()
