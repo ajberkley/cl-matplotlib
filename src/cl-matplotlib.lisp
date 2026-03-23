@@ -3,18 +3,7 @@
   (:export
    #:try-interactive-plot))
 
-(in-package :py4cl2)
-(defun raw-py-exec/no-return (&rest strings)
-  "Execute strings without expecting any return, used to pass
-control permanently to, say, a GUI main loop in the python process.
-Passes strings as they are, without any 'pythonize'ation."
-  (python-start-if-not-alive)
-  (let ((stream (uiop:process-info-input *python*))
-        (str (apply #'concatenate 'string strings)))
-    (bt:with-recursive-lock-held (*python-lock*) ; wait for previous processing to be done
-      (write-char #\x stream)
-      (stream-write-string str stream)
-      (force-output stream))))
+;; you need to use the verison of py4cl2 from my repo
 
 (in-package :cl-matplotlib)
 
@@ -28,13 +17,6 @@ Passes strings as they are, without any 'pythonize'ation."
 
 (defun start-up/internal ()
   (setf *loop-started* nil)
-  (pystop)
-  ;; Changes to py4cl2 to support inverted control loop
-  (setf py4cl2::*python-code*
-	(alexandria:read-file-into-string
-	 (asdf:component-pathname
-          (asdf:find-component :cl-matplotlib "python-code"))))
-  (pystart)
   (py4cl2:pyexec (format nil "import sys; sys.path.insert(0, '~a')"
 			 (directory-namestring
 			  (asdf:component-pathname
@@ -83,3 +65,7 @@ Passes strings as they are, without any 'pythonize'ation."
     (py4cl2:pycall "test.testPlot.load_config" plt "src/config.yaml")
     (py4cl2:pycall "test.testPlot.generate_data" plt)
     (values plt (py4cl2:pycall "test.testPlot.make_plot" plt nil))))
+
+;; venv support
+;;(setf (py4cl2:config-var 'py4cl2:pycmd) "/path/to/python/of/your/venv")
+
