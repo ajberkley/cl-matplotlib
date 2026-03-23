@@ -27,7 +27,7 @@
 			   (asdf:find-component :cl-matplotlib "python-code"))))))
 
 (py4cl2:defpymodule "matplotlib.widgets" nil :lisp-package "WID")
-(py4cl2:defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
+;; (py4cl2:defpymodule "matplotlib.pyplot" nil :lisp-package "PLT") ;; too slow!
 (py4cl2:defpymodule "matplotlib" nil :lisp-package "MPL")
 
 (defun draw (&rest rest)
@@ -38,17 +38,14 @@
 
 
 (defun try-callbacks ()
-  ;; Does not work, even if we poll with pyeval ...
-  ;; experiment more with callbacks.  need to implement
-  ;; asynchronous callbacks into lisp for this to work
-  (pyexec "import matplotlib")
+  (pyexec "import matplotlib.pyplot as plt")
   (destructuring-bind (fig ax)
-      (plt::subplots)
+      (pycall "plt.subplots")
     (declare (ignorable fig))
     (py4cl2:pymethod ax "plot" '(1 2 3) '(3 2 1))
     (let ((button (pycall "matplotlib.widgets.Button" ax "boo")))
       (py4cl2:pymethod button "on_clicked" (alexandria:curry 'draw ax)))
-    (plt::show :block nil)))
+    (pycall "plt.show" :block nil)))
 
 (defun start-loop ()
   "Call this to start the main gui loop"
