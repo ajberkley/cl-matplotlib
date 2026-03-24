@@ -31,6 +31,7 @@
 ;; (py4cl2:defpymodule "matplotlib" nil :lisp-package "MPL")
 
 (defun draw (&rest rest)
+  (format *standard-output* "IN DRAW~%")
   (print rest))
   ;; (py4cl2:pymethod ax "plot"
   ;; 		   (loop repeat 3 collect (random 10))
@@ -38,14 +39,15 @@
 
 
 (defun try-callbacks ()
-  (pyexec "import matplotlib.pyplot as plt")
+  (start-loop)
+  (pyexec "import matplotlib; import matplotlib.pyplot")
   (destructuring-bind (fig ax)
-      (pycall "plt.subplots")
+      (pycall "matplotlib.pyplot.subplots")
     (declare (ignorable fig))
     (py4cl2:pymethod ax "plot" '(1 2 3) '(3 2 1))
     (let ((button (pycall "matplotlib.widgets.Button" ax "boo")))
       (py4cl2:pymethod button "on_clicked" (alexandria:curry 'draw ax)))
-    (pycall "plt.show" :block nil)))
+    (pycall "matplotlib.pyplot.show" :block nil)))
 
 (defun start-loop ()
   "Call this to start the main gui loop"

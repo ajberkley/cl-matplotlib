@@ -8,8 +8,7 @@ def start_app (try_process_message):
         app = QApplication(sys.argv)
 
         matplotlib.use("QtAgg")
-        # w = PyQt6.QMainWindow()
-        # w.show()
+
         plot = plt.plot([1, 2, 3],[4, 5, 6])
         plt.show(block=False)
 
@@ -17,7 +16,7 @@ def start_app (try_process_message):
         def process_messages():
                 try_process_message(blocking=False)
         timer.timeout.connect(process_messages);
-        timer.start(100);
+        timer.start(50);
         print("Going into main loop, will return when all windows closed")
         app.exec()
         print("No more windows, returning to default messsage_dispatch_loop")
