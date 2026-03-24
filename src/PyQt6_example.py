@@ -16,7 +16,7 @@ def start_app (try_process_message):
         def process_messages():
                 try_process_message(blocking=False)
         timer.timeout.connect(process_messages);
-        timer.start(50);
+        timer.start(10);
         print("Going into main loop, will return when all windows closed")
         app.exec()
         print("No more windows, returning to default messsage_dispatch_loop")
