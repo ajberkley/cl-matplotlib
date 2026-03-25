@@ -26,28 +26,33 @@
 			  (asdf:component-pathname
 			   (asdf:find-component :cl-matplotlib "python-code"))))))
 
-;; (py4cl2:defpymodule "matplotlib.widgets" nil :lisp-package "WID")
-;; (py4cl2:defpymodule "matplotlib.pyplot" nil :lisp-package "PLT") ;; too slow!
-;; (py4cl2:defpymodule "matplotlib" nil :lisp-package "MPL")
+(py4cl2:defpymodule "matplotlib.widgets" nil :lisp-package "WID")
+(py4cl2:defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
+(py4cl2:defpymodule "matplotlib" nil :lisp-package "MPL")
 
-(defun draw (&rest rest)
-  (format *standard-output* "IN DRAW~%")
-  (print rest))
-  ;; (py4cl2:pymethod ax "plot"
-  ;; 		   (loop repeat 3 collect (random 10))
-  ;; 		   (loop repeat 3 collect (random 10)))
+(defun draw (ax event)
+  (declare (ignore event))
+  (format *standard-output* "IN DRAW 2~%")
+  (py4cl2:pymethod ax "plot"
+		   (loop repeat 3 collect (random 10))
+		   (loop repeat 3 collect (random 10)))
+  (values))
 
 
 (defun try-callbacks ()
   (start-loop)
   (pyexec "import matplotlib; import matplotlib.pyplot")
+  (plt:ion)
   (destructuring-bind (fig ax)
       (pycall "matplotlib.pyplot.subplots")
     (declare (ignorable fig))
     (py4cl2:pymethod ax "plot" '(1 2 3) '(3 2 1))
-    (let ((button (pycall "matplotlib.widgets.Button" ax "boo")))
-      (py4cl2:pymethod button "on_clicked" (alexandria:curry 'draw ax)))
-    (pycall "matplotlib.pyplot.show" :block nil)))
+    (pymethod fig "subplots_adjust" :bottom 0.2)
+    (let* ((button-ax (pymethod fig "add_axes" '(0.4 0 0.2 0.1)))
+	   (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
+      (py4cl2:pymethod button "on_clicked" (lambda (action)
+					     (draw ax action))))
+    (pymethod fig "show")))
 
 (defun start-loop ()
   "Call this to start the main gui loop"
