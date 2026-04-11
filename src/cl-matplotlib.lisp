@@ -31,28 +31,24 @@
 (py4cl2:defpymodule "matplotlib" nil :lisp-package "MPL")
 
 (defun draw (ax event)
-  (declare (ignore event))
-  (format *standard-output* "IN DRAW 2~%")
+  (format t "Got event ~A~%" event)
   (py4cl2:pymethod ax "plot"
-		   (loop repeat 3 collect (random 10))
-		   (loop repeat 3 collect (random 10)))
-  (values))
-
+                   (loop repeat 3 collect (random 10))
+                   (loop repeat 3 collect (random 10))))
 
 (defun try-callbacks ()
-  (start-loop)
-  (pyexec "import matplotlib; import matplotlib.pyplot")
-  (plt:ion)
+  (unless *loop-started* (start-loop))
+  (pyexec "import matplotlib; import matplotlib.pyplot as plt")
+  (plt:ion) ;; this is critical otherwise redrawing doesn't happen without a plt:pause call
   (destructuring-bind (fig ax)
-      (pycall "matplotlib.pyplot.subplots")
-    (declare (ignorable fig))
-    (py4cl2:pymethod ax "plot" '(1 2 3) '(3 2 1))
-    (pymethod fig "subplots_adjust" :bottom 0.2)
-    (let* ((button-ax (pymethod fig "add_axes" '(0.4 0 0.2 0.1)))
-	   (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
-      (py4cl2:pymethod button "on_clicked" (lambda (action)
-					     (draw ax action))))
-    (pymethod fig "show")))
+      (plt:subplots)
+    (py4cl2:pymethod ax "plot" '(1 2 3) '(3 1 2))
+    (py4cl2:pymethod fig "subplots_adjust" :bottom 0.2)
+    (let* ((button-ax (py4cl2:pymethod fig "add_axes" '(0.7 0.05 0.1 0.075)))
+           (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
+      (py4cl2:pymethod button "on_clicked" (alexandria:curry 'draw ax)))
+    (plt:pause :interval 0.001)
+    (plt:show :block nil)))
 
 (defun start-loop ()
   "Call this to start the main gui loop"
