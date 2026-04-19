@@ -1,5 +1,5 @@
 # cl-matplotlib
-Matlab like interactive plotting experience in Common Lisp using python+matplotlib.
+Matlab like interactive plotting experience in Common Lisp using python+matplotlib using https://github.com/ajberkley/py4cl2 (forked from https://github.com/digikar99/py4cl2 currently, will try and merge changes).
 
 This is a very early work in progress!  If you are interested, create an issue and we can talk about it!
 
