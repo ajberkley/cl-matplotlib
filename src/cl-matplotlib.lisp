@@ -1,7 +1,9 @@
 (defpackage :cl-matplotlib
   (:use :common-lisp :py4cl2)
   (:export
-   #:try-interactive-plot))
+   #:try-interactive-plot)
+  (:documentation "Make sure to call (py4cl2:initialize) first and
+ I suggest using 100 as the lower limit for numpy array transferring"))
 
 ;; you need to use the verison of py4cl2 from my repo
 
@@ -83,6 +85,12 @@
       (uncertain-number-x maybe-uncertain-number)
       maybe-uncertain-number))
 
+(defun export-gaussian ()
+  (py4cl2:export-function (lambda (x) (/ (exp (- (* x x)))
+                                         (sqrt pi))) "lisp_gaussian"))
+
+(deftype sadf () '(simple-array double-float (*)))
+
 (defun plot-xy-data (x y &key (fmt "k."))
   (unless *loop-started* (start-loop))
   (when (and x y)
@@ -92,17 +100,17 @@
       (if (or (uncertain-number-p (elt x 0))
               (uncertain-number-p (elt y 0)))
           (pymethod ax "errorbar"
-                    (map 'list #'maybe-uncertain-number-x x)
-                    (map 'list #'maybe-uncertain-number-x y)
+                    (map 'sadf #'maybe-uncertain-number-x x)
+                    (map 'sadf #'maybe-uncertain-number-x y)
                     :yerr (if (uncertain-number-p (elt y 0))
                               (list
-                               (map 'list #'uncertain-number-s- x)
-                               (map 'list #'uncertain-number-s+ x))
+                               (map 'sadf #'uncertain-number-s- x)
+                               (map 'sadf #'uncertain-number-s+ x))
                               nil)
                     :xerr (if (uncertain-number-p (elt x 0))
                               (list
-                               (map 'list #'uncertain-number-s- y)
-                               (map 'list #'uncertain-number-s+ y))
+                               (map 'sadf #'uncertain-number-s- y)
+                               (map 'sadf #'uncertain-number-s+ y))
                               nil)
                     :fmt fmt
                     :capsize 3.0)
