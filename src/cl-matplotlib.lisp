@@ -60,6 +60,7 @@
   ;; The above will throw an error if the no-return statement did not succeed
   (pyexec "import matplotlib; import matplotlib.pyplot as plt")
   (plt:ion)  ;; this is critical otherwise redrawing doesn't happen without a plt:pause call
+  (pyeval "matplotlib.style.use('fast')")
   (setf *loop-started* t))
 
 (defun try-interactive-plot ()
