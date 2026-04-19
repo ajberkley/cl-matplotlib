@@ -10,6 +10,6 @@ cd ~/quicklisp/local-projects
 git clone https://github.com/ajberkley/py4cl2
 git clone https://github.com/ajberkley/cl-matplotlib
 ```
-You will need to install PyQt6 and some other python things.  Start a virtual env if they aren't globally installed, then start up emacs / slime and (in-package:cl-matplotlib) then (try-callbacks) and click the Boo button to see callbacks into lisp, then (plot-random-data)...
+You will need to pip install PyQt6, matplotlib, numpy, scipy at least.  Start a virtual env if they aren't globally installed, then start up emacs / slime and (in-package:cl-matplotlib) then (try-callbacks) and click the Boo button to see callbacks into lisp, then (plot-random-data)...
 
 <img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/fc189288-08cf-4316-9e22-ec6198c1f03a" />
