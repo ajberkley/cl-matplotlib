@@ -10,5 +10,4 @@ git clone https://github.com/ajberkley/py4cl2
 ```
 
 The next step on the python side is adding a docking window for plots, similar to Matlab's.  I have some attempts in this repo, but I don't understand matplotlib enough yet.  Then a reasonable lisp side interface to plotting with state tracking so we can save and load plots and data and headless plotting, etc.
-
-<img width="1569" height="917" alt="image" src="https://github.com/user-attachments/assets/c8d30e02-4266-4054-ab87-fdb55f64d4a9" />
+<img width="1569" height="917" alt="image" src="https://github.com/user-attachments/assets/d44cb7d9-8e04-4864-a574-d35ad28a123e" />
