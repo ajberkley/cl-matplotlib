@@ -134,6 +134,9 @@
   ;; (title "My happy e$\\chi$periment")
   (pymethod ax "set_title" string))
 
+(defun legend (ax strings &key (loc "best"))
+  (pymethod ax "legend" strings :loc loc))
+
 (defun grid (ax &optional (visible t))
   (pymethod ax "grid" :visible visible))
 
@@ -157,4 +160,5 @@
       (ylabel ax "Resistance ($\\Omega$)")
       (title ax "My happy e$\\chi$periment")
       (grid ax t)
+      (legend ax '("My data series"))
       ax)))
