@@ -6,7 +6,7 @@ from scipy.stats import logistic
 from scipy.optimize import curve_fit
 from matplotlib import pyplot as plt
 
-config = yaml.safe_load(open('src/config.yaml', 'r'))
+# config = yaml.safe_load(open('src/config.yaml', 'r'))
 # turn this on for LaTeX notation (need LaTeX installed)
 #plt.rcParams['text.usetex'] = True
 color_wheel = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -15,7 +15,7 @@ def sigmoid(x, l, s, a, c):
     fy = a * np.exp(y)/(1.+np.exp(y)) + c
     return fy
 
-def fit_pars(x, y, ye, fun, conf):
+def fit_pars(x, y, ye, fun, config):
     res = curve_fit(sigmoid, x, y,
                     sigma=ye,
                     absolute_sigma=True,
@@ -111,7 +111,7 @@ class testPlot:
             self.clicked_points = []
         # refit model to data
         elif event.key == 'm':
-            self.fit_pars = fit_pars(self.x, self.y, self.yerr, sigmoid, config)
+            self.fit_pars = fit_pars(self.x, self.y, self.yerr, sigmoid, slef.config)
         # store shift (and other keys) for "key+click" behaviour
         elif event.key == "shift":
             self.stored_key = event.key
@@ -180,7 +180,7 @@ class testPlot:
         # generate data points
         self.generate_data()
         # fit model to data
-        self.fit_pars = fit_pars(self.x, self.y, self.yerr, sigmoid, config)
+        self.fit_pars = fit_pars(self.x, self.y, self.yerr, sigmoid, self.config)
         fig, ax = plt.subplots(1, 1, figsize=(8, 8))
         ax.set_xlim(np.sign(self.x.min())*np.abs(self.x.min())*1.05,
                     np.sign(self.x.max())*np.abs(self.x.max())*1.05)
