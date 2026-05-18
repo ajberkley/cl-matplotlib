@@ -114,11 +114,23 @@
 
 (deftype sadf () '(simple-array double-float (*)))
 
-(defun plot-xy-data (x y &key (fmt "k."))
+(defun gcf (&optional (title "Default title" title-provided-p))
+  (let ((fig (pyeval "PyQt6_cl_matplotlib.active_figure")))
+    (print fig)
+    (if (or title-provided-p (equal fig "None") (not fig))
+	(pycall "PyQt6_cl_matplotlib.NewFigure" title)
+	fig)))
+
+(defun gca ()
+  (let ((ax (pyeval "PyQt6_cl_matplotlib.active_axis")))
+    (if (equal ax "None") nil ax)))
+
+(defun plot-xy-data (x y &key (fmt "k.") (ax (gca)))
   (unless *loop-started* (start-loop))
   (when (and x y)
-    (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure" "XY plot demo"))
-           (ax (pymethod fig "add_subplot" 111)))
+    (let* ((fig (if ax (pymethod ax "get_figure")
+		    (pycall "PyQt6_cl_matplotlib.NewFigure" "XY plot demo")))
+           (ax (or ax (pymethod fig "add_subplot" 111))))      
       (if (or (uncertain-number-p (elt x 0))
               (uncertain-number-p (elt y 0)))
           (pymethod ax "errorbar"
@@ -137,29 +149,34 @@
                     :fmt fmt
                     :capsize 3.0)
           (pymethod ax "plot" x y fmt))
-      (plt:show :block nil)
+      (draw-axis ax)
       ax)))
 
 (defun xlabel (ax string)
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (xlabel "Resistance ($\\Omega$)")
-  (pymethod ax "set_xlabel" string))
+  (pymethod ax "set_xlabel" string)
+  (draw-axis ax))
 
 (defun ylabel (ax string)
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (ylabel "Resistance ($\\Omega$)")
-  (pymethod ax "set_ylabel" string))
+  (pymethod ax "set_ylabel" string)
+  (draw-axis ax))
 
 (defun title (ax string)
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (title "My happy e$\\chi$periment")
-  (pymethod ax "set_title" string))
+  (pymethod ax "set_title" string)
+  (draw-axis ax))
 
 (defun legend (ax strings &key (loc "best"))
-  (pymethod ax "legend" strings :loc loc))
+  (pymethod ax "legend" strings :loc loc)
+  (draw-axis ax))
 
 (defun grid (ax &optional (visible t))
-  (pymethod ax "grid" :visible visible))
+  (pymethod ax "grid" :visible visible)
+  (draw-axis ax))
 
 (defun plot-random-points (&key (N 10) (fmt "k.") (errorbars t))
   (labels ((random-point ()
@@ -194,7 +211,7 @@
          (surf (pymethod ax "plot_surface" x y z
                          :cmap colormap :linewidth 0 :antialiased nil)))
     (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
-    (draw-axis ax))
+    (draw-axis ax)))
 
 (defun surf-random-data (&optional (N 1000))
   (let ((x (make-array (list N N) :element-type 'double-float))
