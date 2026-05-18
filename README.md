@@ -10,6 +10,8 @@ cd ~/quicklisp/local-projects
 git clone https://github.com/ajberkley/py4cl2
 git clone https://github.com/ajberkley/cl-matplotlib
 ```
-You will need to pip install PyQt6, matplotlib, numpy, scipy at least.  Start a virtual env if they aren't globally installed, then start up emacs / slime and (in-package:cl-matplotlib) then (try-callbacks) and click the Boo button to see callbacks into lisp, then (plot-random-points)...
+You will need to pip install PyQt6, matplotlib, numpy, scipy at least.  Start a virtual env if they aren't globally installed, then start up emacs / slime and (quicklisp:quickload :cl-matplotlib) and then (in-package:cl-matplotlib) then (demo) and click the Boo button to see callbacks into lisp, then (plot-random-points)... you can drag/drop plots to dock/undock them etc.
 
-<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/fc189288-08cf-4316-9e22-ec6198c1f03a" />
+Note that if you are using Ubuntu22 please read the package doc-string for some kludge workarounds for Qt6 dockable windows and wayland issues
+
+<img width="2493" height="1570" alt="image" src="https://github.com/user-attachments/assets/44858e06-f2b4-4832-ac35-0dfb9ebcc3d4" />
