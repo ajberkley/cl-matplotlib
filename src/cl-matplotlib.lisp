@@ -9,6 +9,9 @@
 
 (in-package :cl-matplotlib)
 
+;; venv support
+;;(setf (py4cl2:config-var 'py4cl2:pycmd) "/home/tester/ajb/TYPHON-USER-DEV/cl-matplotlib/.venv/bin/python")
+
 ;; You need to install all the relevant python packages
 ;;  matplotlib
 ;;  scipy
@@ -69,12 +72,9 @@
   (pyexec "import matplotlib")
   (pyexec "import test_interactive_plot as test")
   (let ((plt (pyeval "test.testPlot()")))
-    (pycall "test.testPlot.load_config" plt "src/config.yaml")
+    (pycall "test.testPlot.load_config" plt "/opt/sbcl/quicklisp/local-projects/cl-matplotlib/src/config.yaml")
     (pycall "test.testPlot.generate_data" plt)
     (values plt (pycall "test.testPlot.make_plot" plt nil))))
-
-;; venv support
-;;(setf (py4cl2:config-var 'py4cl2:pycmd) "/path/to/python/of/your/venv")
 
 (defstruct uncertain-number
   (x 0d0 :type double-float)
@@ -162,3 +162,33 @@
       (grid ax t)
       (legend ax '("My data series"))
       ax)))
+
+(defun surf-data (x y z)
+  (pyexec "import matplotlib")
+  (pyexec "from mpl_toolkits.mplot3d import Axes3D")
+
+  (destructuring-bind (fig ax)
+      ;; cannot call plt.subplots directly as it repeats keyword parameters
+      ;; due to bug in importing the module? with positional+keyword parameters?x
+      (pycall "plt.subplots" :subplot_kw (let ((h (make-hash-table)))
+                                           (setf (gethash "projection" h) "3d")
+                                           h))
+    (let ((colormap (pyeval "matplotlib.cm.coolwarm")))
+      (let ((surf (pymethod ax "plot_surface" x y z :cmap colormap
+                                                    :linewidth 0 :antialiased nil)))
+        (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
+        (plt:show :block nil)))))
+
+(defun surf-random-data (&optional (N 1000))
+  (let ((x (make-array (list N N) :element-type 'double-float))
+        (y (make-array (list N N) :element-type 'double-float))
+        (z (make-array (list N N) :element-type 'double-float)))
+    (dotimes (i N)
+      (dotimes (j N)
+        (setf (aref x i j) (* i 1d0))
+        (setf (aref y i j) (* j 1d0))
+        (setf (aref z i j) (random 1d0))))
+    (surf-data x y z)))
+  
+              
+  
