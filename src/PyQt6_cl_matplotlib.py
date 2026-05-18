@@ -42,14 +42,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("PyQt Matplotlib Docking Example")
         self.resize(800, 600)
-        
-        self.plot_dock = MplDockWidget("Interactive Plot")
-        self.plot_dock.ax = dummy_plot(self.plot_dock.figure)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.plot_dock)
 
-        self.plot_dock2 = MplDockWidget("Interactive Plot 2")
-        self.plot_dock2.ax = dummy_plot(self.plot_dock2.figure)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.plot_dock2)
+        # self.plot_dock = MplDockWidget("Interactive Plot")
+        # self.plot_dock.ax = dummy_plot(self.plot_dock.figure)
+        # self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.plot_dock)
+
+        # self.plot_dock2 = MplDockWidget("Interactive Plot 2")
+        # self.plot_dock2.ax = dummy_plot(self.plot_dock2.figure)
+        # self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.plot_dock2)
         
         # self.setCentralWidget(QLabel("Main Application Area", alignment=Qt.AlignmentFlag.AlignCenter))
 

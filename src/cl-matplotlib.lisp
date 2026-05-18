@@ -36,28 +36,30 @@
 (defpymodule "matplotlib" nil :lisp-package "MPL")
 
 (defun draw (ax event)
-  (format t "Got event ~A~%" event)
+  (declare (ignorable event))
   (pymethod ax "plot"
             (loop repeat 3 collect (random 10))
             (loop repeat 3 collect (random 10))))
 
-(defun demo (&optional (start-loop t))
-  "This code uses Common Lisp for interactivity"
-  (when start-loop (pystop) (start-loop))
-  (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure"))
+(defun show-callback-demo ()
+  (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure" "Callback demo"))
          (ax (pymethod fig "add_subplot" 111)))
     (pymethod ax "plot" '(1 2 3) '(3 1 2))
     (pymethod fig "subplots_adjust" :bottom 0.2)
     (let* ((button-ax (pymethod fig "add_axes" '(0.7 0.05 0.1 0.075)))
            (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
       (pymethod button "on_clicked" (lambda (event)
-                                      (draw ax event)
-                                      ;; (plt:draw)
-                                      ;; (pymethod fig "canvas" "draw")
-                                      ;; (plt:show :block nil)
-                                      )))
-    (plt:pause :interval 0.001)
-    (plt:show :block nil)))
+                                      (draw ax event))))
+    ;; (plt:pause :interval 0.001)
+    ;; (plt:show :block nil)
+    ))
+  
+(defun demo (&optional (start-loop t))
+  "This code uses Common Lisp for interactivity"
+  (when start-loop (pystop) (start-loop))
+  (show-callback-demo)
+  (surf-random-data)
+  (plot-random-points))
 
 (defun start-loop ()
   "Call this to start the main gui loop"
@@ -100,9 +102,8 @@
 (defun plot-xy-data (x y &key (fmt "k."))
   (unless *loop-started* (start-loop))
   (when (and x y)
-    (destructuring-bind (fig ax)
-        (plt:subplots)
-      (declare (ignorable fig))
+    (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure" "XY plot demo"))
+           (ax (pymethod fig "add_subplot" 111)))
       (if (or (uncertain-number-p (elt x 0))
               (uncertain-number-p (elt y 0)))
           (pymethod ax "errorbar"
@@ -171,18 +172,13 @@
 (defun surf-data (x y z)
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
-
-  (destructuring-bind (fig ax)
-      ;; cannot call plt.subplots directly as it repeats keyword parameters
-      ;; due to bug in importing the module? with positional+keyword parameters?x
-      (pycall "plt.subplots" :subplot_kw (let ((h (make-hash-table)))
-                                           (setf (gethash "projection" h) "3d")
-                                           h))
-    (let ((colormap (pyeval "matplotlib.cm.coolwarm")))
-      (let ((surf (pymethod ax "plot_surface" x y z :cmap colormap
-                                                    :linewidth 0 :antialiased nil)))
+  (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure" "3D Plot Demo"))
+         (ax (pymethod fig "add_subplot" 111 :projection "3d"))
+         (colormap (pyeval "matplotlib.cm.coolwarm"))
+         (surf (pymethod ax "plot_surface" x y z
+                         :cmap colormap :linewidth 0 :antialiased nil)))
         (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
-        (plt:show :block nil)))))
+        (plt:show :block nil)))
 
 (defun surf-random-data (&optional (N 1000))
   (let ((x (make-array (list N N) :element-type 'double-float))
