@@ -21,16 +21,12 @@ from PyQt6.QtGui import QMouseEvent
 active_figure = None
 active_axis = None
 
-def set_active_figure (figure, event):
+def set_active_figure (figure, axis):
     global active_figure, active_axis
     print(f"Switching to figure: {figure}")
     active_figure = figure
-    if event:
-        print(f"Switching to axis: {event.inaxes}")
-        active_axis = event.inaxes
-    else:
-        active_axis = None
-    
+    print(f"Switching to axis: {axis}")
+    active_axis = axis
 
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
@@ -38,7 +34,7 @@ class MplDockWidget(QDockWidget):
         layout = QVBoxLayout(parent)
         self.figure = Figure()
         self.canvas = FigureCanvas(self.figure)
-        self.canvas.mpl_connect('button_press_event', lambda event: set_active_figure(self.figure, event))
+        self.canvas.mpl_connect('button_press_event', lambda event: set_active_figure(self.figure, event.inaxes))
         self.toolbar = NavigationToolbar(self.canvas, self)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
@@ -51,7 +47,11 @@ class MplDockWidget(QDockWidget):
         # areas.
         if event.button() == Qt.MouseButton.LeftButton:
             #local_pos = event.position()
-            set_active_figure(self.figure, None)
+            axes = self.figure.get_axes()
+            if len(axes) > 0:
+                set_active_figure(self.figure, self.figure.get_axes()[0])
+            else:
+                set_active_figure(self.figure, None)
 
         super().mousePressEvent(event)
 

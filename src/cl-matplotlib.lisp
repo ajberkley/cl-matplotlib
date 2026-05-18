@@ -74,7 +74,7 @@
   (when start-loop (when (py4cl2:python-alive-p) (pystop)) (start-loop))
   (show-callback-demo)
   (surf-random-data)
-  (plot-random-points))
+  (plot-random-points :ax nil))
 
 (defun start-loop ()
   "Call this to start the main gui loop"
@@ -152,33 +152,38 @@
       (draw-axis ax)
       ax)))
 
-(defun xlabel (ax string)
+(defun xlabel (string &key (ax (gca)))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (xlabel "Resistance ($\\Omega$)")
+  (assert ax nil "No current axis")
   (pymethod ax "set_xlabel" string)
   (draw-axis ax))
 
-(defun ylabel (ax string)
+(defun ylabel (string &key (ax (gca)))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (ylabel "Resistance ($\\Omega$)")
+  (assert ax nil "No current axis")
   (pymethod ax "set_ylabel" string)
   (draw-axis ax))
 
-(defun title (ax string)
+(defun title (string &key (ax (gca)))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (title "My happy e$\\chi$periment")
+  (assert ax nil "No current axis")
   (pymethod ax "set_title" string)
   (draw-axis ax))
 
-(defun legend (ax strings &key (loc "best"))
+(defun legend (strings &key (loc "best") (ax (gca)))
+  (assert ax nil "No current axis")
   (pymethod ax "legend" strings :loc loc)
   (draw-axis ax))
 
-(defun grid (ax &optional (visible t))
+(defun grid (&key (visible t) (ax (gca)))
+  (assert ax nil "No current axis")
   (pymethod ax "grid" :visible visible)
   (draw-axis ax))
 
-(defun plot-random-points (&key (N 10) (fmt "k.") (errorbars t))
+(defun plot-random-points (&key (N 10) (fmt "k.") (errorbars t) (ax (gca)))
   (labels ((random-point ()
              (if errorbars
                  (make-uncertain-number :x (- (random 10d0) 5d0)
@@ -193,12 +198,12 @@
              (loop
                repeat N
                collect (random-point))
-             :fmt fmt)))
-      (xlabel ax "position ($\\mu m$)")
-      (ylabel ax "Resistance ($\\Omega$)")
-      (title ax "My happy e$\\chi$periment")
-      (grid ax t)
-      (legend ax '("My data series"))
+             :fmt fmt :ax ax)))
+      (xlabel "position ($\\mu m$)" :ax ax)
+      (ylabel "Resistance ($\\Omega$)" :ax ax)
+      (title "My happy e$\\chi$periment" :ax ax)
+      (grid :visible t :ax ax)
+      (legend '("My data series") :ax ax)
       (draw-axis ax)
       ax)))
 
