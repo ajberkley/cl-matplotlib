@@ -1,7 +1,7 @@
 (defpackage :cl-matplotlib
   (:use :common-lisp :py4cl2)
   (:export
-   #:try-interactive-plot)
+   #:demo)
   (:documentation "Make sure to call (py4cl2:initialize) first and
  I suggest using 100 as the lower limit for numpy array transferring"))
 
@@ -41,7 +41,7 @@
             (loop repeat 3 collect (random 10))
             (loop repeat 3 collect (random 10))))
 
-(defun try-callbacks (&optional (start-loop t))
+(defun demo (&optional (start-loop t))
   "This code uses Common Lisp for interactivity"
   (when start-loop (pystop) (start-loop))
   (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure"))
@@ -51,7 +51,11 @@
     (let* ((button-ax (pymethod fig "add_axes" '(0.7 0.05 0.1 0.075)))
            (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
       (pymethod button "on_clicked" (lambda (event)
-                                      (draw ax event))))
+                                      (draw ax event)
+                                      ;; (plt:draw)
+                                      ;; (pymethod fig "canvas" "draw")
+                                      ;; (plt:show :block nil)
+                                      )))
     (plt:pause :interval 0.001)
     (plt:show :block nil)))
 

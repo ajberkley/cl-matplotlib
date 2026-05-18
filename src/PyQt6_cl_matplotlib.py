@@ -10,7 +10,7 @@ from matplotlib.backends.qt_compat import QtWidgets
 from matplotlib.figure import Figure
 
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel
+from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QVBoxLayout, QWidget
 from PyQt6.QtCore import Qt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -26,11 +26,16 @@ def dummy_plot(figure):
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
         super().__init__(title, parent)
-        
+        self.layout = QVBoxLayout(self)
         self.figure = Figure()
         self.canvas = FigureCanvas(self.figure)
-        
-        self.setWidget(self.canvas)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        self.layout.addWidget(self.toolbar)
+        self.layout.addWidget(self.canvas)
+        # Why we cannot use ourselves as a container, I do not know
+        self.container = QWidget()
+        self.container.setLayout(self.layout)
+        self.setWidget(self.container)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -60,9 +65,12 @@ def NewFigure (title="Hello"):
 
 counter = 1
 
+import matplotlib
+
 def start_app (try_process_message):
     global main_window
     print("Starting!")
+    matplotlib.use("QtAgg")
     app = QtWidgets.QApplication([""])
     main_window = MainWindow()
     main_window.show()
