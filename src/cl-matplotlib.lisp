@@ -40,6 +40,12 @@
 (defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
 (defpymodule "matplotlib" nil :lisp-package "MPL")
 
+(defun draw-axis (ax)
+  (let* ((fig (pymethod ax "get_figure"))
+	 (canvas (pyslot-value fig "canvas")))
+    (pymethod canvas "draw_idle")
+    (values)))
+
 (defparameter *counter* 0)
 
 (defun draw (ax event)
@@ -48,10 +54,7 @@
   (pymethod ax "plot"
             (loop repeat 3 collect (random 10))
             (loop repeat 3 collect (random 10)))
-  (let* ((fig (pymethod ax "get_figure"))
-	 (canvas (pyslot-value fig "canvas")))
-    (pymethod canvas "draw_idle")
-    (values)))
+  (draw-axis ax))
 
 (defparameter *button* nil)
 
@@ -179,6 +182,7 @@
       (title ax "My happy e$\\chi$periment")
       (grid ax t)
       (legend ax '("My data series"))
+      (draw-axis ax)
       ax)))
 
 (defun surf-data (x y z)
@@ -189,8 +193,8 @@
          (colormap (pyeval "matplotlib.cm.coolwarm"))
          (surf (pymethod ax "plot_surface" x y z
                          :cmap colormap :linewidth 0 :antialiased nil)))
-        (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
-        (plt:show :block nil)))
+    (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
+    (draw-axis ax))
 
 (defun surf-random-data (&optional (N 1000))
   (let ((x (make-array (list N N) :element-type 'double-float))
