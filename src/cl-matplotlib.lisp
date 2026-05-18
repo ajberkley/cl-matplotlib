@@ -50,7 +50,8 @@
     (pymethod fig "subplots_adjust" :bottom 0.2)
     (let* ((button-ax (pymethod fig "add_axes" '(0.7 0.05 0.1 0.075)))
            (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
-      (pymethod button "on_clicked" (alexandria:curry 'draw ax)))
+      (pymethod button "on_clicked" (lambda (event)
+                                      (draw ax event))))
     (plt:pause :interval 0.001)
     (plt:show :block nil)))
 

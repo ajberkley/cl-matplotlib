@@ -58,6 +58,8 @@ def NewFigure (title="Hello"):
     main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, widget)
     return widget.figure
 
+counter = 1
+
 def start_app (try_process_message):
     global main_window
     print("Starting!")
@@ -66,6 +68,8 @@ def start_app (try_process_message):
     main_window.show()
     timer = QTimer()
     def process_messages():
+        global counter
+        counter = counter + 1
         try_process_message(blocking=False)
     timer.timeout.connect(process_messages);
     timer.start(100);
