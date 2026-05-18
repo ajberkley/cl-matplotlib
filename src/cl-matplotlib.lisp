@@ -40,11 +40,16 @@
 (defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
 (defpymodule "matplotlib" nil :lisp-package "MPL")
 
+(defparameter *counter* 0)
+
 (defun draw (ax event)
   (declare (ignorable event))
+  (incf *counter*)
   (pymethod ax "plot"
             (loop repeat 3 collect (random 10))
             (loop repeat 3 collect (random 10))))
+
+(defparameter *button* nil)
 
 (defun show-callback-demo ()
   (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure" "Callback demo"))
@@ -54,14 +59,12 @@
     (let* ((button-ax (pymethod fig "add_axes" '(0.7 0.05 0.1 0.075)))
            (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
       (pymethod button "on_clicked" (lambda (event)
-                                      (draw ax event))))
-    ;; (plt:pause :interval 0.001)
-    ;; (plt:show :block nil)
-    ))
+                                      (draw ax event)))
+      (setf *button* button))))
   
 (defun demo (&optional (start-loop t))
   "This code uses Common Lisp for interactivity"
-  (when start-loop (pystop) (start-loop))
+  (when start-loop (when (py4cl2:python-alive-p) (pystop)) (start-loop))
   (show-callback-demo)
   (surf-random-data)
   (plot-random-points))
