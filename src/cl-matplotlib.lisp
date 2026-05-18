@@ -47,7 +47,11 @@
   (incf *counter*)
   (pymethod ax "plot"
             (loop repeat 3 collect (random 10))
-            (loop repeat 3 collect (random 10))))
+            (loop repeat 3 collect (random 10)))
+  (let* ((fig (pymethod ax "get_figure"))
+	 (canvas (pyslot-value fig "canvas")))
+    (pymethod canvas "draw_idle")
+    (values)))
 
 (defparameter *button* nil)
 
