@@ -3,9 +3,14 @@
   (:export
    #:demo)
   (:documentation "Make sure to call (py4cl2:initialize) first and
- I suggest using 100 as the lower limit for numpy array transferring"))
+ I suggest using 100 as the lower limit for numpy array transferring.
 
-;; you need to use the verison of py4cl2 from my repo
+ If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
+ export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
+
+ You need to use the version of py4cl2 from my repo
+"))
+
 
 (in-package :cl-matplotlib)
 
