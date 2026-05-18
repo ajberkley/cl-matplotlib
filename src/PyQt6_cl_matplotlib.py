@@ -15,21 +15,21 @@ from PyQt6.QtCore import Qt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+def dummy_plot(figure):
+        # 2. Add an axis and plot some dummy data
+        ax = figure.add_subplot(111)
+        ax.plot([0, 1, 2, 3], [10, 1, 20, 3], label="Data")
+        ax.set_title("Docked Matplotlib Plot")
+        ax.legend()
+        return ax
+
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
         super().__init__(title, parent)
         
-        # 1. Create Matplotlib Figure & Canvas
         self.figure = Figure()
         self.canvas = FigureCanvas(self.figure)
         
-        # 2. Add an axis and plot some dummy data
-        self.ax = self.figure.add_subplot(111)
-        self.ax.plot([0, 1, 2, 3], [10, 1, 20, 3], label="Data")
-        self.ax.set_title("Docked Matplotlib Plot")
-        self.ax.legend()
-        
-        # 3. Set the canvas as the DockWidget's main widget
         self.setWidget(self.canvas)
 
 class MainWindow(QMainWindow):
@@ -38,26 +38,37 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PyQt Matplotlib Docking Example")
         self.resize(800, 600)
         
-        # 4. Create and add the dockable plot
         self.plot_dock = MplDockWidget("Interactive Plot")
+        self.plot_dock.ax = dummy_plot(self.plot_dock.figure)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.plot_dock)
+
+        self.plot_dock2 = MplDockWidget("Interactive Plot 2")
+        self.plot_dock2.ax = dummy_plot(self.plot_dock2.figure)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.plot_dock2)
         
-        # 5. Add a placeholder central widget (optional)
-        self.setCentralWidget(QLabel("Main Application Area", alignment=Qt.AlignmentFlag.AlignCenter))
+        # self.setCentralWidget(QLabel("Main Application Area", alignment=Qt.AlignmentFlag.AlignCenter))
 
 from PyQt6.QtCore import QTimer
 
+main_window = None
+
+def NewFigure (title="Hello"):
+    # Return a figure
+    widget = MplDockWidget(title)
+    main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, widget)
+    return widget.figure
+
 def start_app (try_process_message):
-        print("Starting!")
-        app = QtWidgets.QApplication([""])
-        main_window = MainWindow()
-        main_window.show()
-        timer = QTimer()
-        def process_messages():
-                try_process_message(blocking=False)
-        timer.timeout.connect(process_messages);
-        timer.start(100);
-        print("Going into main loop, will return when all windows closed")
-        app.exec()
-        print("No more windows, returning to default message_dispatch_loop")
-        
+    global main_window
+    print("Starting!")
+    app = QtWidgets.QApplication([""])
+    main_window = MainWindow()
+    main_window.show()
+    timer = QTimer()
+    def process_messages():
+        try_process_message(blocking=False)
+    timer.timeout.connect(process_messages);
+    timer.start(100);
+    print("Going into main loop, will return when all windows closed")
+    app.exec()
+    print("No more windows, returning to default message_dispatch_loop")

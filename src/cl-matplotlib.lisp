@@ -43,9 +43,9 @@
 
 (defun try-callbacks (&optional (start-loop t))
   "This code uses Common Lisp for interactivity"
-  (when start-loop (start-loop))
-  (destructuring-bind (fig ax)
-      (plt:subplots)
+  (when start-loop (pystop) (start-loop))
+  (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure"))
+         (ax (pymethod fig "add_subplot" 111)))
     (pymethod ax "plot" '(1 2 3) '(3 1 2))
     (pymethod fig "subplots_adjust" :bottom 0.2)
     (let* ((button-ax (pymethod fig "add_axes" '(0.7 0.05 0.1 0.075)))
