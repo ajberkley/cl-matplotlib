@@ -166,6 +166,13 @@
   (pymethod ax "set_ylabel" string)
   (draw-axis ax))
 
+(defun zlabel (string &key (ax (gca)))
+  "Text in $ $ will be interpreted as LaTex. Don't forget \\"
+  ;; (ylabel "Resistance ($\\Omega$)")
+  (assert ax nil "No current axis")
+  (pymethod ax "set_zlabel" string)
+  (draw-axis ax))
+
 (defun title (string &key (ax (gca)))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (title "My happy e$\\chi$periment")
@@ -181,6 +188,21 @@
 (defun grid (&key (visible t) (ax (gca)))
   (assert ax nil "No current axis")
   (pymethod ax "grid" :visible visible)
+  (draw-axis ax))
+
+(defun xlim (x0 x1 &key (ax (gca)))
+  (assert ax nil "No current axis")
+  (pymethod ax "set_xlim" x0 x1)
+  (draw-axis ax))
+
+(defun ylim (y0 y1 &key (ax (gca)))
+  (assert ax nil "No current axis")
+  (pymethod ax "set_ylim" y0 y1)
+  (draw-axis ax))
+
+(defun zlim (z0 z1 &key (ax (gca)))
+  (assert ax nil "No current axis")
+  (pymethod ax "set_zlim" z0 z1)
   (draw-axis ax))
 
 (defun plot-random-points (&key (N 10) (fmt "k.") (errorbars t) (ax (gca)))
