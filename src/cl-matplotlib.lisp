@@ -238,7 +238,10 @@
                          :cmap colormap :linewidth 0 :antialiased nil
                          :axlim_clip t)))
     (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
-    (draw-axis ax)))
+    (draw-axis ax)
+    ax))
+
+(defun sqr (x) (* x x))
 
 (defun surf-random-data (&optional (N 1000))
   (let ((x (make-array (list N N) :element-type 'double-float))
@@ -248,8 +251,11 @@
       (dotimes (j N)
         (setf (aref x i j) (* i 1d0))
         (setf (aref y i j) (* j 1d0))
-        (setf (aref z i j) (random 1d0))))
-    (surf-data x y z)))
-  
-              
-  
+        (setf (aref z i j)
+              (let ((p (sqrt (/ (+ (sqr (- i (/ N 2)))
+                                   (sqr (- j (/ N 2))))
+                                (/ N 1.5d0)))))
+                (if (zerop p) 1d0 (+ (/ (sin p) p) (random 0.3d0)))))))
+    (let ((ax (surf-data x y z)))
+      (title "Noisy Sync" :ax ax))))
+
