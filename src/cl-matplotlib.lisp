@@ -236,7 +236,8 @@
          (ax (pymethod fig "add_subplot" 111 :projection "3d"))
          (colormap (pyeval "matplotlib.cm.coolwarm"))
          (surf (pymethod ax "plot_surface" x y z
-                         :cmap colormap :linewidth 0 :antialiased nil)))
+                         :cmap colormap :linewidth 0 :antialiased nil
+                         :axlim_clip t)))
     (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
     (draw-axis ax)))
 
