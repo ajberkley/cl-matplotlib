@@ -46,18 +46,30 @@
     (pymethod canvas "draw_idle")
     (values)))
 
+(defun new-figure (&optional (title "Default title"))
+  (pycall "PyQt6_cl_matplotlib.NewFigure" title))
+
+(defun add-rectangle (x y w h &key (ax (gca)) (color "r"))
+  (assert ax nil "No current axis")
+  (let ((rec (pycall "matplotlib.patches.Rectangle" (list x y) w h :color color)))
+    (pymethod ax "add_patch" rec)))
+
+(defun demo-patch (&key (ax (gca)))
+  (add-rectangle 2.0 2.5 0.5 0.5 :color "b" :ax ax)  
+  (draw-axis ax))
+
 (defparameter *counter* 0)
 
 (defun draw (ax event)
   (declare (ignorable event))
   (incf *counter*)
   (pymethod ax "plot"
-            (loop repeat 3 collect (random 10))
-            (loop repeat 3 collect (random 10)))
+            (loop repeat 30 collect (random 10))
+            (loop repeat 30 collect (random 10)))
   (draw-axis ax))
 
 (defun show-callback-demo ()
-  (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure" "Callback demo"))
+  (let* ((fig (new-figure "Callback demo"))
          (ax (pymethod fig "add_subplot" 111)))
     (pymethod ax "plot" '(1 2 3) '(3 1 2))
     (pymethod fig "subplots_adjust" :bottom 0.2)
@@ -117,7 +129,7 @@
   (let ((fig (pyeval "PyQt6_cl_matplotlib.active_figure")))
     (print fig)
     (if (or title-provided-p (equal fig "None") (not fig))
-	(pycall "PyQt6_cl_matplotlib.NewFigure" title)
+	(new-figure title)
 	fig)))
 
 (defun gca ()
@@ -128,7 +140,7 @@
   (unless *loop-started* (start-loop))
   (when (and x y)
     (let* ((fig (if ax (pymethod ax "get_figure")
-		    (pycall "PyQt6_cl_matplotlib.NewFigure" "XY plot demo")))
+		    (new-figure "XY plot demo")))
            (ax (or ax (pymethod fig "add_subplot" 111))))      
       (if (or (uncertain-number-p (elt x 0))
               (uncertain-number-p (elt y 0)))
@@ -231,7 +243,7 @@
 (defun surf-data (x y z)
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
-  (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure" "3D Plot Demo"))
+  (let* ((fig (new-figure "3D Plot Demo"))
          (ax (pymethod fig "add_subplot" 111 :projection "3d"))
          (colormap (pyeval "matplotlib.cm.coolwarm"))
          (surf (pymethod ax "plot_surface" x y z
