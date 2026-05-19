@@ -58,14 +58,32 @@
   (add-rectangle 2.0 2.5 0.5 0.5 :color "b" :ax ax)  
   (draw-axis ax))
 
+(defun lots-of-patches (&optional (N 50000))
+  (let* ((fig (new-figure "Patch demo"))
+         (ax (pymethod fig "add_subplot" 111)))
+    (labels ((random-array (range)
+               (coerce (loop repeat N collect (random range))
+                       '(simple-array double-float (*)))))
+      (let ((xs (random-array 1d0))
+            (ys (random-array 1d0))
+            (ws (random-array 0.01d0))
+            (hs (random-array 0.01d0)))
+        (pycall "PyQt6_cl_matplotlib.draw_lots_of_patches" xs ys ws hs ax))
+    ;; (time
+    ;;  (dotimes (i N)
+    ;;    (add-rectangle (random 1d0) (random 1d0) (random 0.01d0) (random 0.01d0)
+    ;;                   :ax ax :color (elt '("r" "b" "g" "y" "c" "m" "k")
+    ;;                                      (random 7)))))
+    (draw-axis ax))))
+
 (defparameter *counter* 0)
 
 (defun draw (ax event)
   (declare (ignorable event))
   (incf *counter*)
   (pymethod ax "plot"
-            (loop repeat 30 collect (random 10))
-            (loop repeat 30 collect (random 10)))
+            (loop repeat 3 collect (random 10))
+            (loop repeat 3 collect (random 10)))
   (draw-axis ax))
 
 (defun show-callback-demo ()

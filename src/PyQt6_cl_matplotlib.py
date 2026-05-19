@@ -69,6 +69,13 @@ def NewFigure (title="Hello"):
     main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, widget)
     return widget.figure
 
+def draw_lots_of_patches (xs, ys, ws, hs, ax):
+    def make_rectangle(x, y, w, h):
+        return matplotlib.patches.Rectangle((x, y), w, h)
+
+    patches = matplotlib.collections.PatchCollection(list(map(make_rectangle, xs, ys, ws, hs)), match_original=True)
+    ax.add_collection(patches)
+
 counter = 1
 
 import matplotlib
