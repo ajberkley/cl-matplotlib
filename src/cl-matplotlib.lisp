@@ -56,8 +56,6 @@
             (loop repeat 3 collect (random 10)))
   (draw-axis ax))
 
-(defparameter *button* nil)
-
 (defun show-callback-demo ()
   (let* ((fig (pycall "PyQt6_cl_matplotlib.NewFigure" "Callback demo"))
          (ax (pymethod fig "add_subplot" 111)))
@@ -67,7 +65,8 @@
            (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
       (pymethod button "on_clicked" (lambda (event)
                                       (draw ax event)))
-      (setf *button* button))))
+      ;; store button to prevent it from getting gc'ed
+      (setf (pyslot-value fig "button") button))))
   
 (defun demo (&optional (start-loop t))
   "This code uses Common Lisp for interactivity"
