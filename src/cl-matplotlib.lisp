@@ -38,9 +38,9 @@
 		   (asdf:component-pathname
 		    (asdf:find-component :cl-matplotlib "python-code"))))))
 
-(defpymodule "matplotlib.widgets" nil :lisp-package "WID")
-(defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
-(defpymodule "matplotlib" nil :lisp-package "MPL")
+;; (defpymodule "matplotlib.widgets" nil :lisp-package "WID")
+;; (defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
+;; (defpymodule "matplotlib" nil :lisp-package "MPL")
 
 (defun draw-axis (ax)
   (let* ((fig (pymethod ax "get_figure"))
