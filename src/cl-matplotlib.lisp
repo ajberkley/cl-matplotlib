@@ -1,7 +1,9 @@
 (defpackage :cl-matplotlib
   (:use :common-lisp :py4cl2)
   (:export
-   #:demo)
+   #:demo
+   #:plot-xy-data
+   #:plot-errorbar)
   (:documentation "Make sure to call (py4cl2:initialize) first and
  I suggest using 100 as the lower limit for numpy array transferring.
 
@@ -162,9 +164,9 @@
                     (pymethod ax "get_figure")
 		    (new-figure "XY plot demo")))
            (ax (or ax (pymethod fig "add_subplot" 111))))
-      (pymethod ax "plot" x y fmt))
+      (pymethod ax "plot" x y fmt)
       (draw-axis ax)
-      ax))
+      ax)))
 
 (defun xlabel (string &key (ax (gca)))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
