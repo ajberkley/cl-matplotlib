@@ -155,6 +155,7 @@
               :xerr (list x- x+)
               :fmt fmt
               :capsize 3.0)
+    (draw-axis ax)
     ax))
 
 (defun plot-xy-data (x y &key (fmt "k.") (ax (gca)))
