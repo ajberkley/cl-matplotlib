@@ -35,6 +35,7 @@ class MplDockWidget(QDockWidget):
         self.figure = Figure()
         self.canvas = FigureCanvas(self.figure)
         self.canvas.mpl_connect('button_press_event', lambda event: set_active_figure(self.figure, event.inaxes))
+        set_active_figure(self.figure, None)
         self.toolbar = NavigationToolbar(self.canvas, self)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
