@@ -127,21 +127,9 @@
     (pycall "test.testPlot.generate_data" plt)
     (values plt (pycall "test.testPlot.make_plot" plt nil))))
 
-(defstruct uncertain-number
-  (x 0d0 :type double-float)
-  (s+ 0d0 :type double-float)
-  (s- 0d0 :type double-float))
-
-(defun maybe-uncertain-number-x (maybe-uncertain-number)
-  (if (uncertain-number-p maybe-uncertain-number)
-      (uncertain-number-x maybe-uncertain-number)
-      maybe-uncertain-number))
-
 (defun export-gaussian ()
   (py4cl2:export-function (lambda (x) (/ (exp (- (* x x)))
                                          (sqrt pi))) "lisp_gaussian"))
-
-(deftype sadf () '(simple-array double-float (*)))
 
 (defun gcf (&optional (title "Default title" title-provided-p))
   (let ((fig (pyeval "PyQt6_cl_matplotlib.active_figure")))
@@ -154,32 +142,29 @@
   (let ((ax (pyeval "PyQt6_cl_matplotlib.active_axis")))
     (if (equal ax "None") nil ax)))
 
+(defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") (ax (gca)))
+  (unless *loop-started* (start-loop))
+  (let* ((fig (if ax
+                  (pymethod ax "get_figure")
+		  (new-figure "XY plot demo")))
+         (ax (or ax (pymethod fig "add_subplot" 111))))
+    (pymethod ax "errorbar" x y
+              :yerr (list y- y+)
+              :xerr (list x- x+)
+              :fmt fmt
+              :capsize 3.0)
+    ax))
+
 (defun plot-xy-data (x y &key (fmt "k.") (ax (gca)))
   (unless *loop-started* (start-loop))
   (when (and x y)
-    (let* ((fig (if ax (pymethod ax "get_figure")
+    (let* ((fig (if ax
+                    (pymethod ax "get_figure")
 		    (new-figure "XY plot demo")))
-           (ax (or ax (pymethod fig "add_subplot" 111))))      
-      (if (or (uncertain-number-p (elt x 0))
-              (uncertain-number-p (elt y 0)))
-          (pymethod ax "errorbar"
-                    (map 'sadf #'maybe-uncertain-number-x x)
-                    (map 'sadf #'maybe-uncertain-number-x y)
-                    :yerr (if (uncertain-number-p (elt y 0))
-                              (list
-                               (map 'sadf #'uncertain-number-s- x)
-                               (map 'sadf #'uncertain-number-s+ x))
-                              nil)
-                    :xerr (if (uncertain-number-p (elt x 0))
-                              (list
-                               (map 'sadf #'uncertain-number-s- y)
-                               (map 'sadf #'uncertain-number-s+ y))
-                              nil)
-                    :fmt fmt
-                    :capsize 3.0)
-          (pymethod ax "plot" x y fmt))
+           (ax (or ax (pymethod fig "add_subplot" 111))))
+      (pymethod ax "plot" x y fmt))
       (draw-axis ax)
-      ax)))
+      ax))
 
 (defun xlabel (string &key (ax (gca)))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
@@ -235,21 +220,16 @@
   (draw-axis ax))
 
 (defun plot-random-points (&key (N 10) (fmt "k.") (errorbars t) (ax (gca)))
-  (labels ((random-point ()
-             (if errorbars
-                 (make-uncertain-number :x (- (random 10d0) 5d0)
-                                        :s- (+ 0.5d0 (random 0.5d0))
-                                        :s+ (+ 0.5d0 (random 0.5d0)))
-                 (- (random 10d0) 5d0))))
+  (labels ((rand (&optional (scale 10d0))
+             (loop repeat N collect (- (random scale) (/ scale 2d0))))
+           (prand (&optional (scale 1d0))
+             (loop repeat N collect (random scale))))
     (let ((ax
-            (plot-xy-data
-             (loop
-               repeat N
-               collect (random-point))
-             (loop
-               repeat N
-               collect (random-point))
-             :fmt fmt :ax ax)))
+            (if errorbars
+                (plot-errorbar (rand) (prand) (prand)
+                               (rand) (prand) (prand)
+                               :fmt fmt :ax ax)
+                (plot-xy-data (rand) (rand) :fmt fmt :ax ax))))
       (xlabel "position ($\\mu m$)" :ax ax)
       (ylabel "Resistance ($\\Omega$)" :ax ax)
       (title "My happy e$\\chi$periment" :ax ax)
