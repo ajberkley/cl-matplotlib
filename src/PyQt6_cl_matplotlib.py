@@ -13,7 +13,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QVBoxLayout, QWidget
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QMouseEvent, QCloseEvent
 
 # Our figures are not managed by pyplot, as written here.  We could use it
 # to track active figures, etc, but it seems better if we leave control to
@@ -32,9 +32,13 @@ class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
         super().__init__(title, parent)
         layout = QVBoxLayout(parent)
+        self.closing = False
         self.figure = Figure()
         self.canvas = FigureCanvas(self.figure)
-        self.canvas.mpl_connect('button_press_event', lambda event: set_active_figure(self.figure, event.inaxes))
+        def update_active_figure (event):
+            if not self.closing:
+                set_active_figure(self.figure, event.inaxes)
+        self.canvas.mpl_connect('button_press_event', update_active_figure)
         set_active_figure(self.figure, None)
         self.toolbar = NavigationToolbar(self.canvas, self)
         layout.addWidget(self.toolbar)
@@ -46,15 +50,26 @@ class MplDockWidget(QDockWidget):
     def mousePressEvent(self, event: QMouseEvent):
         # This handles mouse click events outside the active matplotlib
         # areas.
-        if event.button() == Qt.MouseButton.LeftButton:
-            #local_pos = event.position()
-            axes = self.figure.get_axes()
-            if len(axes) > 0:
-                set_active_figure(self.figure, self.figure.get_axes()[0])
-            else:
-                set_active_figure(self.figure, None)
+        if not self.closing:
+            if event.button() == Qt.MouseButton.LeftButton:
+                #local_pos = event.position()
+                axes = self.figure.get_axes()
+                if len(axes) > 0:
+                    set_active_figure(self.figure, self.figure.get_axes()[0])
+                else:
+                    set_active_figure(self.figure, None)
 
         super().mousePressEvent(event)
+
+    def closeEvent(self, event: QCloseEvent):
+        global active_figure
+        global active_axis
+        self.closing = True
+        if self.figure == active_figure:
+            if active_axis and active_axis.get_figure() == self.figure:
+                active_axis = None
+            active_figure = None
+        super().closeEvent(event)
 
 class MainWindow(QMainWindow):
     def __init__(self):

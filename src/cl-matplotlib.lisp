@@ -3,7 +3,15 @@
   (:export
    #:demo
    #:plot-xy-data
-   #:plot-errorbar)
+   #:plot-errorbar
+   #:gca
+   #:xlabel
+   #:ylabel
+   #:title
+   #:legend
+   #:grid
+   #:draw-axis
+   #:zlabel)
   (:documentation "Make sure to call (py4cl2:initialize) first and
  I suggest using 100 as the lower limit for numpy array transferring.
 
@@ -135,14 +143,16 @@
 
 (defun gcf (&optional (title "Default title" title-provided-p))
   (let ((fig (pyeval "PyQt6_cl_matplotlib.active_figure")))
-    (print fig)
     (if (or title-provided-p (equal fig "None") (not fig))
 	(new-figure title)
 	fig)))
 
 (defun gca ()
   (let ((ax (pyeval "PyQt6_cl_matplotlib.active_axis")))
-    (if (equal ax "None") nil ax)))
+    (if (equal ax "None")
+        (let ((axes (pymethod (gcf) "get_axes")))
+          (and (not (= (length axes) 0)) (elt axes 0)))
+        ax)))
 
 (defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") (ax (gca)))
   (unless *loop-started* (start-loop))
