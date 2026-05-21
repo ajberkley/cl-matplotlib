@@ -11,21 +11,20 @@
    #:legend
    #:grid
    #:draw-axis
-   #:zlabel)
-  (:documentation "Make sure to call (py4cl2:initialize) first and
- I suggest using 100 as the lower limit for numpy array transferring.
-
+   #:zlabel
+   #:tri-surf)
+  (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
 
- You need to use the version of py4cl2 from my repo
-"))
+ You need to use the version of py4cl2 from my repo"))
 
 
 (in-package :cl-matplotlib)
 
 ;; venv support
 ;;(setf (py4cl2:config-var 'py4cl2:pycmd) "/home/tester/ajb/TYPHON-USER-DEV/cl-matplotlib/.venv/bin/python")
+(setf (py4cl2:config-var 'py4cl2:numpy-pickle-lower-bound) 300)
 
 ;; You need to install all the relevant python packages
 ;;  matplotlib
@@ -279,6 +278,17 @@
     (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
     (draw-axis ax)
     ax))
+
+(defun tri-surf (x y z &key fig)
+  (pyexec "import matplotlib")
+  (pyexec "from mpl_toolkits.mplot3d import Axes3D")
+  (let ((fig (or fig (new-figure "3D Plot Demo")))
+        (ax (gca)))
+    (when ax (pymethod ax "remove")) ;; in case it isn't 3D
+    (setf ax (pymethod fig "add_subplot" 111 :projection "3d"))
+    (let ((colormap (pyeval "matplotlib.cm.coolwarm")))
+      (pymethod ax "plot_trisurf" x y z :cmap colormap :axlim_clip t)
+      (draw-axis ax))))
 
 (defun sqr (x) (* x x))
 
