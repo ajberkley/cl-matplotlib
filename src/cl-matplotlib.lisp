@@ -141,43 +141,58 @@
   (py4cl2:export-function (lambda (x) (/ (exp (- (* x x)))
                                          (sqrt pi))) "lisp_gaussian"))
 
-(defun gcf (&optional (title "Default title" title-provided-p))
+(defun gcf (&optional (title nil title-provided-p))
+  "If title-provided, then will create a figure if one does not
+ currently exist."
   (let ((fig (pyeval "PyQt6_cl_matplotlib.active_figure")))
-    (if (or title-provided-p (equal fig "None") (not fig))
-	(new-figure title)
-	fig)))
+    (if (equal fig "None")
+        (when title-provided-p
+          (let ((fig (new-figure title)))
+            (pycall "PyQt6_cl_matplotlib.set_active_figure" fig "None")
+            fig))
+        fig)))
 
-(defun gca ()
+(defun gca (&optional (figure-title-if-new "Default figure title"))
+  "Return last used axis.  If no figure exists, create a new one and a new axis"
   (let ((ax (pyeval "PyQt6_cl_matplotlib.active_axis")))
-    (if (equal ax "None")
-        (let ((axes (pymethod (gcf) "get_axes")))
-          (and (not (= (length axes) 0)) (elt axes 0)))
+    (if (or (not ax) (equal ax "None"))
+        (let* ((fig (gcf figure-title-if-new))
+               (axes (pymethod fig "get_axes"))
+               (ax (and (not (= (length axes) 0)) (elt axes 0))))
+          (when (or (not ax) (equal ax "None"))
+            (setf ax (pymethod fig "add_subplot" 111)))
+          (pycall "PyQt6_cl_matplotlib.set_active_figure" fig ax)
+          ax)
         ax)))
 
-(defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") (ax (gca)))
+(defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") ax)
   (unless *loop-started* (start-loop))
-  (let* ((fig (if ax
-                  (pymethod ax "get_figure")
-		  (new-figure "XY plot demo")))
-         (ax (or ax (pymethod fig "add_subplot" 111))))
-    (pymethod ax "errorbar" x y
-              :yerr (list y- y+)
-              :xerr (list x- x+)
-              :fmt fmt
-              :capsize 3.0)
-    (draw-axis ax)
-    ax))
+  (setf ax (get-axis! ax "Errorbar plot demo"))
+  (pymethod ax "errorbar" x y
+            :yerr (list y- y+)
+            :xerr (list x- x+)
+            :fmt fmt
+            :capsize 3.0)
+  (draw-axis ax)
+  ax)
 
-(defun plot-xy-data (x y &key (fmt "k.") (ax (gca)))
+(defun get-figure! (&optional (figure-title "Default figure title"))
+  "May create a new figure.  Always returns a figure."
+  (gcf figure-title))
+
+(defun get-axis! (&optional (ax (gca)) (figure-title "Default figure title"))
+  "May create a new figure.  Always returns an axis."
+  (if (and ax (not (equal ax "None")))
+      ax
+      (gca figure-title)))
+
+(defun plot-xy-data (x y &key (fmt "k.") ax)
   (unless *loop-started* (start-loop))
   (when (and x y)
-    (let* ((fig (if ax
-                    (pymethod ax "get_figure")
-		    (new-figure "XY plot demo")))
-           (ax (or ax (pymethod fig "add_subplot" 111))))
-      (pymethod ax "plot" x y fmt)
-      (draw-axis ax)
-      ax)))
+    (setf ax (get-axis! ax "XY plot demo"))
+    (pymethod ax "plot" x y fmt)
+    (draw-axis ax)
+    ax))
 
 (defun xlabel (string &key (ax (gca)))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
@@ -281,4 +296,3 @@
                 (if (zerop p) 1d0 (+ (/ (sin p) p) (random 0.3d0)))))))
     (let ((ax (surf-data x y z)))
       (title "Noisy Sync" :ax ax))))
-
