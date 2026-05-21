@@ -107,12 +107,13 @@
                                       (draw ax event)))
       ;; store button to prevent it from getting gc'ed
       (setf (pyslot-value fig "button") button))))
-  
+
 (defun demo (&optional (start-loop t))
   "This code uses Common Lisp for interactivity"
   (when start-loop (when (py4cl2:python-alive-p) (pystop)) (start-loop))
   (show-callback-demo)
   (surf-random-data)
+  (new-figure "Errorbar demo")
   (plot-random-points :ax nil))
 
 (defun start-loop ()
