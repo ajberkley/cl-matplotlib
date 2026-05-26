@@ -55,8 +55,8 @@
 ;; (defpymodule "matplotlib" nil :lisp-package "MPL")
 
 (defun draw-axis (ax)
-  (let* ((fig (pymethod ax "get_figure"))
-	 (canvas (pyslot-value fig "canvas")))
+  (let* ((fig (axis-figure ax))
+	 (canvas (pyslot-value (figure-handle fig) "canvas")))
     (pymethod canvas "draw_idle")
     (values)))
 
@@ -215,8 +215,8 @@
 
 (defun demo (&optional (start-loop t))
   "This code uses Common Lisp for interactivity"
+  (clear-figure-tracking)
   (when start-loop (when (py4cl2:python-alive-p)
-                     (clear-figure-tracking)
                      (pystop)) (start-loop))
   (show-callback-demo)
   (surf-random-data)
@@ -272,7 +272,7 @@
 (defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") ax)
   (unless *loop-started* (start-loop))
   (setf ax (get-axis! ax "Errorbar plot demo"))
-  (pymethod ax "errorbar" x y
+  (pymethod (axis-handle ax) "errorbar" x y
             :yerr (list y- y+)
             :xerr (list x- x+)
             :fmt fmt
@@ -286,9 +286,7 @@
 
 (defun get-axis! (&optional (ax (gca)) (figure-title "Default figure title"))
   "May create a new figure.  Always returns an axis."
-  (if (and ax (not (equal ax "None")))
-      ax
-      (gca figure-title)))
+  (or ax (gca figure-title)))
 
 (defun plot-xy-data (x y &key (fmt "k.") ax)
   (unless *loop-started* (start-loop))
@@ -298,58 +296,59 @@
     (draw-axis ax)
     ax))
 
-(defun xlabel (string &key (ax (gca)))
+(defun xlabel (string &key (ax (gca)) (draw t))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
+  (declare (type axis axis))
   ;; (xlabel "Resistance ($\\Omega$)")
   (assert ax nil "No current axis")
-  (pymethod ax "set_xlabel" string)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "set_xlabel" string)
+  (when draw (draw-axis ax)))
 
-(defun ylabel (string &key (ax (gca)))
+(defun ylabel (string &key (ax (gca)) (draw t))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (ylabel "Resistance ($\\Omega$)")
   (assert ax nil "No current axis")
-  (pymethod ax "set_ylabel" string)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "set_ylabel" string)
+  (when draw (draw-axis ax)))
 
-(defun zlabel (string &key (ax (gca)))
+(defun zlabel (string &key (ax (gca)) (draw t))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (ylabel "Resistance ($\\Omega$)")
   (assert ax nil "No current axis")
-  (pymethod ax "set_zlabel" string)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "set_zlabel" string)
+  (when draw (draw-axis ax)))
 
-(defun title (string &key (ax (gca)))
+(defun title (string &key (ax (gca)) (draw t))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (title "My happy e$\\chi$periment")
   (assert ax nil "No current axis")
-  (pymethod ax "set_title" string)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "set_title" string)
+  (when draw (draw-axis ax)))
 
-(defun legend (strings &key (loc "best") (ax (gca)))
+(defun legend (strings &key (loc "best") (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod ax "legend" strings :loc loc)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "legend" strings :loc loc)
+  (when draw (draw-axis ax)))
 
-(defun grid (&key (visible t) (ax (gca)))
+(defun grid (&key (visible t) (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod ax "grid" :visible visible)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "grid" :visible visible)
+  (when draw (draw-axis ax)))
 
-(defun xlim (x0 x1 &key (ax (gca)))
+(defun xlim (x0 x1 &key (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod ax "set_xlim" x0 x1)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "set_xlim" x0 x1)
+  (when draw (draw-axis ax)))
 
-(defun ylim (y0 y1 &key (ax (gca)))
+(defun ylim (y0 y1 &key (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod ax "set_ylim" y0 y1)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "set_ylim" y0 y1)
+  (when draw (draw-axis ax)))
 
-(defun zlim (z0 z1 &key (ax (gca)))
+(defun zlim (z0 z1 &key (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod ax "set_zlim" z0 z1)
-  (draw-axis ax))
+  (pymethod (axis-handle ax) "set_zlim" z0 z1)
+  (when draw (draw-axis ax)))
 
 (defun plot-random-points (&key (N 10) (fmt "k.") (errorbars t) (ax (gca)))
   (labels ((rand (&optional (scale 10d0))
@@ -374,12 +373,12 @@
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
   (let* ((fig (new-figure "3D Plot Demo"))
-         (ax (add-subplot 111 "3d"))
+         (ax (add-subplot fig 111 "3d"))
          (colormap (pyeval "matplotlib.cm.coolwarm"))
-         (surf (pymethod ax "plot_surface" x y z
+         (surf (pymethod (axis-handle ax) "plot_surface" x y z
                          :cmap colormap :linewidth 0 :antialiased nil
                          :axlim_clip t)))
-    (pymethod fig "colorbar" surf :shrink 0.5 :aspect 5)
+    (pymethod (figure-handle fig) "colorbar" surf :shrink 0.5 :aspect 5)
     (draw-axis ax)
     ax))
 
