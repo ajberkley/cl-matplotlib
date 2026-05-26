@@ -115,11 +115,13 @@
   ;; UGH PYTHON REFERENCES ARE NOT DE-DUPLICATED
   ;; ON THE PYTHON SIDE, WTF?
   (let* ((fig *current-figure*))
-    (format t "Searching for ~A in ~A~%" axis-handle (figure-axes fig))
+    ;;(cl-user::log-for cl-user::info "Searching for ~A in ~A~%" axis-handle (figure-axes fig))
     (let ((ax (find axis-handle (figure-axes fig) :key #'axis-handle :test
                     (lambda (a b) (pyeval a "==" b))))) ;; slow!
-      (assert ax nil "set-active-axis-handle called with an uknown axis-handle")
-      (setf (figure-current-axis fig) ax))
+      ;; There may not be an axis if we have never created a plot on it,
+      ;; like a button, for example...?
+      (when ax
+        (setf (figure-current-axis fig) ax)))
     (values)))
 
 (defun set-active-axis (ax)
