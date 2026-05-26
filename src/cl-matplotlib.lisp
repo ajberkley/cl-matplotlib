@@ -103,13 +103,9 @@
 (defun register-new-axis (figure new-axis)
   (push new-axis (figure-axes figure)))
 
-(defun set-active-figure (figure-name &optional expected-fig-handle)
-  (cl-user::log-for cl-user::info "Setting ~A as current figure" figure-name)
-  (let ((fig (get-figure figure-name)))
-    (assert fig nil "Cannot set ~A active, there is no such figure" figure-name)
-    (when expected-fig-handle
-      (assert (equalp (figure-handle fig) expected-fig-handle) nil "Figure has changed under us?"))
-    (setf *current-figure* fig)))
+(defun set-active-figure (figure)
+  ;;(cl-user::log-for cl-user::info "Setting ~A as current figure" figure)
+  (setf *current-figure* figure))
 
 (defun figure-is-open (figure-name)
   (gethash figure-name *active-figures*))
@@ -127,7 +123,7 @@
     (values)))
 
 (defun set-active-axis (ax)
-  (cl-user::log-for cl-user::info "Setting ~A as current axis" ax)
+  ;;(cl-user::log-for cl-user::info "Setting ~A as current axis" ax)
   (let ((fig (axis-figure ax)))
     (setf *current-figure* fig)
     (pushnew ax (figure-axes fig))

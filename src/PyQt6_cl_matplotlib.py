@@ -34,7 +34,7 @@ class MplDockWidget(QDockWidget):
         self.name = title
         def update_active_figure (event):
             if not self.closing:
-                set_active_figure(self.figure.name, event.inaxes)
+                set_active_figure(self.name, event.inaxes)
         self.canvas.mpl_connect('button_press_event', update_active_figure)
         self.toolbar = NavigationToolbar(self.canvas, self)
         layout.addWidget(self.toolbar)
@@ -51,9 +51,9 @@ class MplDockWidget(QDockWidget):
                 #local_pos = event.position()
                 axes = self.figure.get_axes()
                 if len(axes) > 0:
-                    set_active_figure(self.figure.name, self.figure.get_axes()[0])
+                    set_active_figure(self.name, self.figure.get_axes()[0])
                 else:
-                    set_active_figure(self.figure.name, None)
+                    set_active_figure(self.name, None)
 
         super().mousePressEvent(event)
 
