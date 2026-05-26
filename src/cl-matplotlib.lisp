@@ -196,7 +196,7 @@
 (defun draw (ax event)
   (declare (ignorable event))
   (incf *counter*)
-  (pymethod ax "plot"
+  (pymethod (axis-handle ax) "plot"
             (loop repeat 3 collect (random 10))
             (loop repeat 3 collect (random 10)))
   (draw-axis ax))
@@ -209,7 +209,7 @@
     (let* ((button-ax (pymethod (figure-handle fig) "add_axes" '(0.7 0.05 0.1 0.075)))
            (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
       (pymethod button "on_clicked" (lambda (event)
-                                      (draw (axis-handle ax) event)))
+                                      (draw ax event)))
       ;; store button to prevent it from getting gc'ed
       (setf (pyslot-value (figure-handle fig) "button") button))))
 
