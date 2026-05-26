@@ -15,19 +15,15 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QVBo
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QMouseEvent, QCloseEvent
 
-# Our figures are not managed by pyplot, as written here.  We could use it
-# to track active figures, etc, but it seems better if we leave control to
-# ourselves.
-active_figure = None
-active_axis = None
+set_active_figure = None
 
-def set_active_figure (figure, axis):
-    global active_figure, active_axis
-    print(f"Switching to figure: {figure}")
-    active_figure = figure
-    print(f"Switching to axis: {axis}")
-    active_axis = axis
-
+# We do not let pyplot manage figure activeness, as we need thread local
+# active figures (logging can occur simultaneous to user interactive plotting,
+# headless figures can be drawn at the same time, etc).
+def set_callback (activate_figure_callback):
+    global set_active_figure
+    set_active_figure = activate_figure_callback
+    
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
         super().__init__(title, parent)
@@ -35,11 +31,11 @@ class MplDockWidget(QDockWidget):
         self.closing = False
         self.figure = Figure()
         self.canvas = FigureCanvas(self.figure)
+        self.name = title
         def update_active_figure (event):
             if not self.closing:
-                set_active_figure(self.figure, event.inaxes)
+                set_active_figure(self.figure.name, event.inaxes)
         self.canvas.mpl_connect('button_press_event', update_active_figure)
-        set_active_figure(self.figure, None)
         self.toolbar = NavigationToolbar(self.canvas, self)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
@@ -55,9 +51,9 @@ class MplDockWidget(QDockWidget):
                 #local_pos = event.position()
                 axes = self.figure.get_axes()
                 if len(axes) > 0:
-                    set_active_figure(self.figure, self.figure.get_axes()[0])
+                    set_active_figure(self.figure.name, self.figure.get_axes()[0])
                 else:
-                    set_active_figure(self.figure, None)
+                    set_active_figure(self.figure.name, None)
 
         super().mousePressEvent(event)
 
@@ -89,7 +85,7 @@ def draw_lots_of_patches (xs, ys, ws, hs, ax):
     def make_rectangle(x, y, w, h):
         return matplotlib.patches.Rectangle((x, y), w, h)
 
-    patches = matplotlib.collections.PatchCollection(list(map(make_rectangle, xs, ys, ws, hs)), match_original=True)
+    patches = matplotlib.collections.PolyCollection(list(map(make_rectangle, xs, ys, ws, hs)), match_original=True)
     ax.add_collection(patches)
 
 counter = 1

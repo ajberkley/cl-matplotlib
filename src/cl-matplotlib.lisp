@@ -12,7 +12,12 @@
    #:grid
    #:draw-axis
    #:zlabel
-   #:tri-surf)
+   #:tri-surf
+   #:new-figure
+   #:set-window-style
+   #:set-figure-active
+   #:close-figure
+   #:figure-is-open)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -55,8 +60,101 @@
     (pymethod canvas "draw_idle")
     (values)))
 
-(defun new-figure (&optional (title "Default title"))
-  (pycall "PyQt6_cl_matplotlib.NewFigure" title))
+(defstruct axis
+  (handle nil) ;; a python handle
+  (figure (make-figure) :type figure))
+
+(defmethod print-object ((obj axis) stream)
+  (print-unreadable-object (obj stream)
+    (format stream "AXIS of ~A" (figure-name (axis-figure obj)))))
+
+(defstruct figure
+  (handle nil) ;; a python handle
+  (axes nil :type list) ;; a list of axes
+  (current-axis nil :type (or null axis)) ;; current axis of the figure
+  (layout-info nil) ;; for automatic tiled layout and stuff
+  (name nil))
+
+(defvar *current-figure* nil
+  "Should be bound locally, except of interaction at the REPL which will use this
+ global value. At the REPL, activating or creating a new figure will update this.
+ Logged plotting will use its own locally re-bound value for this.  A goal is to
+ avoid interference between logged plotting and user interactive plotting.")
+
+(defvar *active-figures* (make-hash-table :test 'equal)
+  "All visible figures will have an entry in this hash table from their global
+ identifier to a python figure object.  Careful to keep this up-to-date to not
+ leak memory on the lisp (and python) side.")
+
+(defun clear-figure-tracking ()
+  (setf *current-figure* nil)
+  (clrhash *active-figures*))
+
+(defun get-figure (figure-name)
+  (gethash figure-name *active-figures*))
+
+(defun register-new-figure (figure-name figure-handle &optional current-axis layout)
+  (assert (not (get-figure figure-name)) nil "Creating a new figure with same name as existing figure")
+  (let ((fig (make-figure :handle figure-handle :axes nil :current-axis current-axis
+                          :layout-info layout :name figure-name)))
+    (setf (gethash figure-name *active-figures*) fig)
+    fig))
+
+(defun register-new-axis (figure new-axis)
+  (push new-axis (figure-axes figure)))
+
+(defun set-active-figure (figure-name &optional expected-fig-handle)
+  (cl-user::log-for cl-user::info "Setting ~A as current figure" figure-name)
+  (let ((fig (get-figure figure-name)))
+    (assert fig nil "Cannot set ~A active, there is no such figure" figure-name)
+    (when expected-fig-handle
+      (assert (equalp (figure-handle fig) expected-fig-handle) nil "Figure has changed under us?"))
+    (setf *current-figure* fig)))
+
+(defun figure-is-open (figure-name)
+  (gethash figure-name *active-figures*))
+
+(defun set-active-axis-handle (axis-handle)
+  "This is a callback from python"
+  ;; UGH PYTHON REFERENCES ARE NOT DE-DUPLICATED
+  ;; ON THE PYTHON SIDE, WTF?
+  (let* ((fig *current-figure*))
+    (format t "Searching for ~A in ~A~%" axis-handle (figure-axes fig))
+    (let ((ax (find axis-handle (figure-axes fig) :key #'axis-handle :test
+                    (lambda (a b) (pyeval a "==" b))))) ;; slow!
+      (assert ax nil "set-active-axis-handle called with an uknown axis-handle")
+      (setf (figure-current-axis fig) ax))
+    (values)))
+
+(defun set-active-axis (ax)
+  (cl-user::log-for cl-user::info "Setting ~A as current axis" ax)
+  (let ((fig (axis-figure ax)))
+    (setf *current-figure* fig)
+    (pushnew ax (figure-axes fig))
+    (setf (figure-current-axis fig) ax)))
+
+(defun gcf ()
+  *current-figure*)
+
+(defun new-figure (&optional (figure-name "default-figure") (layout "normal"))
+  (assert (not (get-figure figure-name)) nil
+          "Figure with name ~A already exists" figure-name)
+  (let ((figure-handle (pycall "PyQt6_cl_matplotlib.NewFigure" figure-name)))
+    (setf *current-figure* (register-new-figure figure-name figure-handle nil layout))))
+
+(defun set-figure-active (figure-name)
+  (let ((figure (get-figure figure-name)))
+    (assert figure nil "Figure with name ~A does not exist" figure-name)
+    (setf *current-figure* figure)))
+
+(defun set-window-style (figure style)
+  (when (string= style "docked")
+    (warn "Starting docked not supported yet"))
+  (when (string= style "normal")
+    t))
+
+(defun close-figure (figure)
+  (warn "Implement me"))
 
 (defun add-rectangle (x y w h &key (ax (gca)) (color "r"))
   (assert ax nil "No current axis")
@@ -67,9 +165,17 @@
   (add-rectangle 2.0 2.5 0.5 0.5 :color "b" :ax ax)  
   (draw-axis ax))
 
+(defun add-subplot (figure &optional (subplot-id 111) (projection "rectilinear"))
+  "Returns an `AXIS' object"
+  ;; TODO check and see if a subplot already exists in the figure-axes?
+  (let ((ax (pymethod (figure-handle figure) "add_subplot" subplot-id
+                      :projection projection)))
+    (set-active-axis (make-axis :handle ax :figure figure))))
+
+
 (defun lots-of-patches (&optional (N 50000))
   (let* ((fig (new-figure "Patch demo"))
-         (ax (pymethod fig "add_subplot" 111)))
+         (ax (add-subplot fig)))
     (labels ((random-array (range)
                (coerce (loop repeat N collect (random range))
                        '(simple-array double-float (*)))))
@@ -95,21 +201,23 @@
             (loop repeat 3 collect (random 10)))
   (draw-axis ax))
 
-(defun show-callback-demo ()
-  (let* ((fig (new-figure "Callback demo"))
-         (ax (pymethod fig "add_subplot" 111)))
-    (pymethod ax "plot" '(1 2 3) '(3 1 2))
-    (pymethod fig "subplots_adjust" :bottom 0.2)
-    (let* ((button-ax (pymethod fig "add_axes" '(0.7 0.05 0.1 0.075)))
+(defun show-callback-demo (&optional (figure-name "Callback demo"))
+  (let* ((fig (or (get-figure figure-name) (new-figure figure-name)))
+         (ax (add-subplot fig)))
+    (pymethod (axis-handle ax) "plot" '(1 2 3) '(3 1 2))
+    (pymethod (figure-handle fig) "subplots_adjust" :bottom 0.2)
+    (let* ((button-ax (pymethod (figure-handle fig) "add_axes" '(0.7 0.05 0.1 0.075)))
            (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
       (pymethod button "on_clicked" (lambda (event)
-                                      (draw ax event)))
+                                      (draw (axis-handle ax) event)))
       ;; store button to prevent it from getting gc'ed
-      (setf (pyslot-value fig "button") button))))
+      (setf (pyslot-value (figure-handle fig) "button") button))))
 
 (defun demo (&optional (start-loop t))
   "This code uses Common Lisp for interactivity"
-  (when start-loop (when (py4cl2:python-alive-p) (pystop)) (start-loop))
+  (when start-loop (when (py4cl2:python-alive-p)
+                     (clear-figure-tracking)
+                     (pystop)) (start-loop))
   (show-callback-demo)
   (surf-random-data)
   (new-figure "Errorbar demo")
@@ -119,6 +227,7 @@
   "Call this to start the main gui loop"
   (start-up/internal)
   (py4cl2::raw-py-exec/no-return "import PyQt6_cl_matplotlib; PyQt6_cl_matplotlib.start_app(try_process_message);")
+  (py4cl2:pycall "PyQt6_cl_matplotlib.set_callback" (lambda (fig-name axis) (set-active-figure (get-figure fig-name)) (set-active-axis-handle axis)))
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
@@ -154,17 +263,12 @@
 
 (defun gca (&optional (figure-title-if-new "Default figure title"))
   "Return last used axis.  If no figure exists, create a new one and a new axis"
-  (let ((ax (pyeval "PyQt6_cl_matplotlib.active_axis")))
-    (if (or (not ax) (equal ax "None"))
-        (let* ((fig (gcf figure-title-if-new))
-               (axes (pymethod fig "get_axes"))
-               (ax (and (not (= (length axes) 0)) (elt axes 0))))
-          (when (or (not ax) (equal ax "None"))
-            (setf ax (pymethod fig "add_subplot" 111)))
-          (pycall "PyQt6_cl_matplotlib.set_active_figure" fig ax)
-          ax)
-        ax)))
-
+  (let ((fig *current-figure*))
+    (when (not fig)
+      (setf fig (new-figure figure-title-if-new)))
+    (let ((ax (figure-current-axis fig)))
+      (or ax (setf ax (add-subplot fig))))))
+        
 (defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") ax)
   (unless *loop-started* (start-loop))
   (setf ax (get-axis! ax "Errorbar plot demo"))
@@ -270,7 +374,7 @@
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
   (let* ((fig (new-figure "3D Plot Demo"))
-         (ax (pymethod fig "add_subplot" 111 :projection "3d"))
+         (ax (add-subplot 111 "3d"))
          (colormap (pyeval "matplotlib.cm.coolwarm"))
          (surf (pymethod ax "plot_surface" x y z
                          :cmap colormap :linewidth 0 :antialiased nil
@@ -282,10 +386,11 @@
 (defun tri-surf (x y z &key fig)
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
-  (let ((fig (or fig (new-figure "3D Plot Demo")))
-        (ax (gca)))
+  (let* ((fig (or fig (new-figure "3D Plot Demo")))
+         (ax (figure-current-axis fig)))
+    ;; TODO FIXME
     (when ax (pymethod ax "remove")) ;; in case it isn't 3D
-    (setf ax (pymethod fig "add_subplot" 111 :projection "3d"))
+    (setf ax (add-subplot 111 :projection "3D"))
     (let ((colormap (pyeval "matplotlib.cm.coolwarm")))
       (pymethod ax "plot_trisurf" x y z :cmap colormap :axlim_clip t)
       (draw-axis ax))))
