@@ -68,6 +68,7 @@ class MplDockWidget(QDockWidget):
         
     def closeEvent(self, event: QCloseEvent):
         self.closing = True
+        close_window_callback(self.name)
         super().closeEvent(event)
 
 class MainWindow(QMainWindow):

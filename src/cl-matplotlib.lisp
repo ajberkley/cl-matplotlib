@@ -103,7 +103,8 @@
 (defun delete-figure (figure-name)
   (remhash figure-name *active-figures*)
   (let ((current-figure *current-figure*))
-    (when (equal figure-name (figure-name current-figure))
+    (when (and current-figure
+               (equal figure-name (figure-name current-figure)))
       (setf *current-figure* nil))))
 
 (defun register-new-figure (figure-name figure-handle &optional current-axis layout)
