@@ -33,6 +33,7 @@ class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         # self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         # self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         # self.setWindowFlag(Qt.WindowType.Tool)
@@ -62,8 +63,7 @@ class MplDockWidget(QDockWidget):
         # implement standard matplotlib keypress behavior
         if event.key == 'ctrl+w':
             self.close_window()
-        else:
-            key_press_handler(event, self.canvas, self.toolbar)
+        key_press_handler(event, self.canvas, self.toolbar)
         
     def mousePressEvent(self, event: QMouseEvent):
         # This handles mouse click events outside the active matplotlib
@@ -80,20 +80,22 @@ class MplDockWidget(QDockWidget):
 
         super().mousePressEvent(event)
 
-    def close_window (self):
+    def clean_up_details (self):
         self.closing = True
         close_window_callback(self.name)
         main_window.removeDockWidget(self)
-        # main_window.maybe_hide() # does not work because we haven't been removed yet
+        for child in self.children():
+            if isinstance(child, QRubberBand):
+                child.hide()
+                child.deleteLater()
         self.deleteLater()
+        
+    def close_window (self):
+        self.clean_up_details()
         self.close()
         
     def closeEvent(self, event: QCloseEvent):
-        self.closing = True
-        close_window_callback(self.name)
-        main_window.removeDockWidget(self)
-        # main_window.maybe_hide() # does not work because children haven't been removed yet
-        self.deleteLater()
+        self.clean_up_details()
         super().closeEvent(event)
 
 class MainWindow(QMainWindow):
@@ -105,6 +107,8 @@ class MainWindow(QMainWindow):
 
     def maybe_hide(self):
         child_objects = main_window.children()
+        # end up with a rubberband object that we need to kill
+        print(f"{child_objects}")
         if len(child_objects) == 1:
             self.setVisible(False)
 
