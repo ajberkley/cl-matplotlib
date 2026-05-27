@@ -69,8 +69,7 @@ class MplDockWidget(QDockWidget):
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
-        print(f"Got {event}") 
-        if event.key() == Qt.Key.Key_W & Qt.KeyboardModifier.ControlModifier:
+        if event.key() == Qt.Key.Key_W and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.close_window()
         else:
             super().keyPressEvent(event)
