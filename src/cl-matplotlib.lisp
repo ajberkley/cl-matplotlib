@@ -68,7 +68,8 @@
 
 (defstruct axis
   (handle nil) ;; a python handle
-  (figure (make-figure) :type figure))
+  (figure (make-figure) :type figure)
+  (subplot nil))
 
 (defmethod print-object ((obj axis) stream)
   (print-unreadable-object (obj stream)
@@ -176,8 +177,7 @@
   ;; TODO check and see if a subplot already exists in the figure-axes?
   (let ((ax (pymethod (figure-handle figure) "add_subplot" subplot-id
                       :projection projection)))
-    (set-active-axis (make-axis :handle ax :figure figure))))
-
+    (set-active-axis (make-axis :handle ax :figure figure :subplot subplot-id))))
 
 (defun lots-of-patches (&optional (N 50000))
   (let* ((fig (new-figure "Patch demo"))
@@ -275,10 +275,12 @@
     (let ((ax (figure-current-axis fig)))
       (or ax (setf ax (add-subplot fig))))))
 
-(defun cla ()
-  (let* ((fig *current-figure*)
-         (ax (figure-current-axis fig)))
-    (when ax (pymethod (axis-handle ax) "clear"))))
+(defun cla (&key (figure *current-figure*) (subplot-id 111))
+  (let ((ax (find-if (lambda (ax) (eql (axis-subplot ax) subplot-id))
+                     (figure-axes figure))))
+    (when ax
+      (setf (figure-axes figure) (delete ax (figure-axes figure)))
+      (pymethod (figure-handle figure) "delaxes" (axis-handle ax)))))
         
 (defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") ax)
   (unless *loop-started* (start-loop))
