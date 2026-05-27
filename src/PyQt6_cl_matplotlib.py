@@ -77,11 +77,15 @@ class MplDockWidget(QDockWidget):
     def close_window (self):
         self.closing = True
         close_window_callback(self.name)
+        main_window.removeDockWidget(self)
+        self.deleteLater()
         self.close()
         
     def closeEvent(self, event: QCloseEvent):
         self.closing = True
         close_window_callback(self.name)
+        main_window.removeDockWidget(self)
+        self.deleteLater()
         super().closeEvent(event)
 
 class MainWindow(QMainWindow):
@@ -100,6 +104,12 @@ def NewFigure (title="Hello", docked=True):
     widget.name = title
     main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, widget)
     return widget.figure
+
+def get_windows ():
+    global main_window
+    child_objects = main_window.children()
+    # child_windows = [c for c in child_objects if c.isWindow()]
+    return child_objects
 
 def draw_lots_of_patches (xs, ys, ws, hs, ax):
     def make_rectangle(x, y, w, h):
