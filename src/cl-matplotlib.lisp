@@ -101,7 +101,10 @@
   (gethash figure-name *active-figures*))
 
 (defun delete-figure (figure-name)
-  (remhash figure-name *active-figures*))
+  (remhash figure-name *active-figures*)
+  (let ((current-figure *current-figure*))
+    (when (equal figure-name (figure-name current-figure))
+      (setf *current-figure* nil))))
 
 (defun register-new-figure (figure-name figure-handle &optional current-axis layout)
   (assert (not (get-figure figure-name)) nil "Creating a new figure with same name as existing figure")
@@ -276,11 +279,13 @@
       (or ax (setf ax (add-subplot fig))))))
 
 (defun cla (&key (figure *current-figure*) (subplot-id 111))
-  (let ((ax (find-if (lambda (ax) (eql (axis-subplot ax) subplot-id))
-                     (figure-axes figure))))
-    (when ax
-      (setf (figure-axes figure) (delete ax (figure-axes figure)))
-      (pymethod (figure-handle figure) "delaxes" (axis-handle ax)))))
+  (when figure
+    (let ((ax (find-if (lambda (ax) (eql (axis-subplot ax) subplot-id))
+                       (figure-axes figure))))
+      (when ax
+        ;;(format t "Deleting figure ~A axis ~A~%" figure ax)
+        (setf (figure-axes figure) (delete ax (figure-axes figure)))
+        (pymethod (figure-handle figure) "delaxes" (axis-handle ax))))))
         
 (defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") ax)
   (unless *loop-started* (start-loop))
