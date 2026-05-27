@@ -78,6 +78,7 @@ class MplDockWidget(QDockWidget):
         self.closing = True
         close_window_callback(self.name)
         main_window.removeDockWidget(self)
+        # main_window.maybe_hide() # does not work because we haven't been removed yet
         self.deleteLater()
         self.close()
         
@@ -85,6 +86,7 @@ class MplDockWidget(QDockWidget):
         self.closing = True
         close_window_callback(self.name)
         main_window.removeDockWidget(self)
+        # main_window.maybe_hide() # does not work because children haven't been removed yet
         self.deleteLater()
         super().closeEvent(event)
 
@@ -95,11 +97,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Matplotlib workbench")
         self.resize(800, 600)
 
+    def maybe_hide(self):
+        child_objects = main_window.children()
+        print(f"{child_objects} and len is {len(child_objects)}")
+        if len(child_objects) == 1:
+            self.setVisible(False)
+
 main_window = None
 
 def NewFigure (title="Hello", docked=True):
     # Return a figure
     global main_window
+    if main_window.isVisible() == False:
+        main_window.setVisible(True)
     widget = MplDockWidget(title=f"{title}", parent=main_window)
     widget.name = title
     main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, widget)
@@ -136,6 +146,9 @@ def start_app (try_process_message):
         try_process_message(blocking=False)
     timer.timeout.connect(process_messages);
     timer.start(100);
+    timer_maybe_hide = QTimer()
+    timer_maybe_hide.timeout.connect(lambda: main_window.maybe_hide())
+    timer_maybe_hide.start(500);
     print("Going into main loop, will return when all windows closed")
     app.exec()
     print("No more windows, returning to default message_dispatch_loop")
