@@ -38,7 +38,6 @@ class MplDockWidget(QDockWidget):
         layout = QVBoxLayout()
         self.closing = False
         self.figure = Figure()
-        self.figure.shutdown = self.close_window
         self.figure.dockwidget = self
         self.canvas = FigureCanvas(self.figure)
         self.name = title

@@ -15,7 +15,6 @@
    #:tri-surf
    #:new-figure
    #:set-figure-active
-   #:close-figure
    #:figure-is-open
    #:add-subplot
    #:get-figure
@@ -26,7 +25,8 @@
    #:*active-figures*
    #:set-active-figure
    #:delete-figure
-   #:*current-figure*)
+   #:*current-figure*
+   #:set-window-style/matplotlib)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -109,7 +109,7 @@
   (let ((fig (gethash figure-name *active-figures*)))
     (when fig
       (remhash figure-name *active-figures*)
-      (ignore-errors (close-figure fig))))
+      (ignore-errors (close-figure& fig))))
   (let ((current-figure *current-figure*))
     (when (and current-figure
                (equal figure-name (figure-name current-figure)))
@@ -174,9 +174,10 @@
       (let ((widget (pyslot-value (figure-handle *current-figure*) "dockwidget")))
         (pymethod widget "setFloating" (if (string= style "normal") t nil))))))
 
-(defun close-figure (figure)
+(defun close-figure& (figure)
+  "Do not call me, call delete-figure"
   (declare (type figure figure))
-  (pycall (pyslot-value (pyslot-value (figure-handle figure) "figure") "shutdown")))
+  (pymethod (pyslot-value (pyslot-value (figure-handle figure) "figure") "dockwidget") "close_window"))
 
 (defun add-rectangle (x y w h &key (ax (gca)) (color "r"))
   (assert ax nil "No current axis")
