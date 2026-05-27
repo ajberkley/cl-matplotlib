@@ -11,7 +11,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QVBoxLayout, QWidget, QRubberBand, QLayout
 from PyQt6 import QtCore
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QMouseEvent, QCloseEvent, QKeyEvent
@@ -84,10 +84,6 @@ class MplDockWidget(QDockWidget):
         self.closing = True
         close_window_callback(self.name)
         main_window.removeDockWidget(self)
-        for child in self.children():
-            if isinstance(child, QRubberBand):
-                child.hide()
-                child.deleteLater()
         self.deleteLater()
         
     def close_window (self):
@@ -108,8 +104,8 @@ class MainWindow(QMainWindow):
     def maybe_hide(self):
         child_objects = main_window.children()
         # end up with a rubberband object that we need to kill
-        print(f"{child_objects}")
-        if len(child_objects) == 1:
+        important_children = [c for c in child_objects if not(isinstance(c, QRubberBand) or isinstance(c, QLayout))]
+        if len(important_children) == 0:
             self.setVisible(False)
 
 main_window = None
