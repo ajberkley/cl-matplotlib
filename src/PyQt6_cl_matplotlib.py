@@ -12,6 +12,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QVBoxLayout, QWidget
+from PyQt6 import QtCore
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QMouseEvent, QCloseEvent, QKeyEvent
 
@@ -25,7 +26,9 @@ def set_callbacks (activate_figure_callback, close_window_func):
     global set_active_figure, close_window_callback
     set_active_figure = activate_figure_callback
     close_window_callback = close_window_func
-    
+
+from matplotlib.backend_bases import key_press_handler
+
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
         super().__init__(parent)
@@ -51,7 +54,17 @@ class MplDockWidget(QDockWidget):
         self.container = QWidget()
         self.container.setLayout(layout)
         self.setWidget(self.container)
-
+        self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.canvas.mpl_connect('key_press_event', self.on_key_press)
+        #self.canvas.setFocus()
+        
+    def on_key_press(self, event):
+        # implement standard matplotlib keypress behavior
+        if event.key == 'ctrl+w':
+            self.close_window()
+        else:
+            key_press_handler(event, self.canvas, self.toolbar)
+        
     def mousePressEvent(self, event: QMouseEvent):
         # This handles mouse click events outside the active matplotlib
         # areas.
@@ -66,12 +79,6 @@ class MplDockWidget(QDockWidget):
                     set_active_figure(self.name, None)
 
         super().mousePressEvent(event)
-
-    def keyPressEvent(self, event: QKeyEvent):
-        if event.key() == Qt.Key.Key_W and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.close_window()
-        else:
-            super().keyPressEvent(event)
 
     def close_window (self):
         self.closing = True
