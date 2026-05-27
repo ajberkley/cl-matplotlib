@@ -23,7 +23,10 @@
    #:start-loop
    #:defun
    #:cla
-   #:clear-figure-tracking)
+   #:clear-figure-tracking
+   #:*active-figures*
+   #:set-active-figure
+   #:delete-figure)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -80,7 +83,8 @@
   (axes nil :type list) ;; a list of axes
   (current-axis nil :type (or null axis)) ;; current axis of the figure
   (layout-info nil) ;; for automatic tiled layout and stuff
-  (name nil))
+  (name nil) ;; This is the window title
+  (number (- (expt 2 32) 1) :type (unsigned-byte 32))) ;; unique session identifier
 
 (defvar *current-figure* nil
   "Should be bound locally, except of interaction at the REPL which will use this
@@ -101,7 +105,11 @@
   (gethash figure-name *active-figures*))
 
 (defun delete-figure (figure-name)
-  (remhash figure-name *active-figures*)
+  ;;(cl-user::log-for cl-user::info "Deleting figure ~A" figure-name)
+  (let ((fig (gethash figure-name *active-figures*)))
+    (when fig
+      (remhash figure-name *active-figures*)
+      (ignore-errors (close-figure fig))))
   (let ((current-figure *current-figure*))
     (when (and current-figure
                (equal figure-name (figure-name current-figure)))

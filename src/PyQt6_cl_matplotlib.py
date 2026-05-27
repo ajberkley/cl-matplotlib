@@ -28,7 +28,9 @@ def set_callbacks (activate_figure_callback, close_window_func):
     
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
-        super().__init__(title, parent)
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setWindowTitle(title)
         layout = QVBoxLayout(parent)
         self.closing = False
         self.figure = Figure()
@@ -74,6 +76,7 @@ class MplDockWidget(QDockWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowTitle("Matplotlib workbench")
         self.resize(800, 600)
 
@@ -81,7 +84,8 @@ main_window = None
 
 def NewFigure (title="Hello"):
     # Return a figure
-    widget = MplDockWidget()
+    global main_window
+    widget = MplDockWidget(title=f"{title}", parent=main_window)
     widget.name = title
     main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, widget)
     return widget.figure
