@@ -99,7 +99,6 @@ class MainWindow(QMainWindow):
 
     def maybe_hide(self):
         child_objects = main_window.children()
-        print(f"{child_objects} and len is {len(child_objects)}")
         if len(child_objects) == 1:
             self.setVisible(False)
 
