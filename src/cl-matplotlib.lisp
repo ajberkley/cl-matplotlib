@@ -18,7 +18,12 @@
    #:set-figure-active
    #:close-figure
    #:figure-is-open
-   #:add-subplot)
+   #:add-subplot
+   #:get-figure
+   #:start-loop
+   #:defun
+   #:cla
+   #:clear-figure-tracking)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -135,9 +140,6 @@
     (pushnew ax (figure-axes fig))
     (setf (figure-current-axis fig) ax)))
 
-(defun gcf ()
-  *current-figure*)
-
 (defun new-figure (&optional (figure-name "default-figure") (layout "normal"))
   (assert (not (get-figure figure-name)) nil
           "Figure with name ~A already exists" figure-name)
@@ -150,6 +152,7 @@
     (setf *current-figure* figure)))
 
 (defun set-window-style (figure style)
+  (declare (ignorable figure))
   (when (string= style "docked")
     (warn "Starting docked not supported yet"))
   (when (string= style "normal")
@@ -258,16 +261,11 @@
   (py4cl2:export-function (lambda (x) (/ (exp (- (* x x)))
                                          (sqrt pi))) "lisp_gaussian"))
 
-(defun gcf (&optional (title nil title-provided-p))
+(defun gcf (&optional (title "default-figure"))
   "If title-provided, then will create a figure if one does not
  currently exist."
-  (let ((fig (pyeval "PyQt6_cl_matplotlib.active_figure")))
-    (if (equal fig "None")
-        (when title-provided-p
-          (let ((fig (new-figure title)))
-            (pycall "PyQt6_cl_matplotlib.set_active_figure" fig "None")
-            fig))
-        fig)))
+  (or *current-figure*
+      (new-figure title)))
 
 (defun gca (&optional (figure-title-if-new "Default figure title"))
   "Return last used axis.  If no figure exists, create a new one and a new axis"
@@ -276,6 +274,11 @@
       (setf fig (new-figure figure-title-if-new)))
     (let ((ax (figure-current-axis fig)))
       (or ax (setf ax (add-subplot fig))))))
+
+(defun cla ()
+  (let* ((fig *current-figure*)
+         (ax (figure-current-axis fig)))
+    (when ax (pymethod (axis-handle ax) "clear"))))
         
 (defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") ax)
   (unless *loop-started* (start-loop))
@@ -300,13 +303,12 @@
   (unless *loop-started* (start-loop))
   (when (and x y)
     (setf ax (get-axis! ax "XY plot demo"))
-    (pymethod ax "plot" x y fmt)
+    (pymethod (axis-handle ax) "plot" x y fmt)
     (draw-axis ax)
     ax))
 
 (defun xlabel (string &key (ax (gca)) (draw t))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
-  (declare (type axis axis))
   ;; (xlabel "Resistance ($\\Omega$)")
   (assert ax nil "No current axis")
   (pymethod (axis-handle ax) "set_xlabel" string)

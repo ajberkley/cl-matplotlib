@@ -80,7 +80,8 @@ main_window = None
 
 def NewFigure (title="Hello"):
     # Return a figure
-    widget = MplDockWidget(title)
+    widget = MplDockWidget()
+    widget.name = title
     main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, widget)
     return widget.figure
 
