@@ -16,13 +16,15 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QMouseEvent, QCloseEvent
 
 set_active_figure = None
+close_window_callback = None
 
 # We do not let pyplot manage figure activeness, as we need thread local
 # active figures (logging can occur simultaneous to user interactive plotting,
 # headless figures can be drawn at the same time, etc).
-def set_callback (activate_figure_callback):
-    global set_active_figure
+def set_callbacks (activate_figure_callback, close_window_func):
+    global set_active_figure, close_window_callback
     set_active_figure = activate_figure_callback
+    close_window_callback = close_window_func
     
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
@@ -30,6 +32,7 @@ class MplDockWidget(QDockWidget):
         layout = QVBoxLayout(parent)
         self.closing = False
         self.figure = Figure()
+        self.figure.shutdown = self.close_window
         self.canvas = FigureCanvas(self.figure)
         self.name = title
         def update_active_figure (event):
@@ -49,6 +52,7 @@ class MplDockWidget(QDockWidget):
         if not self.closing:
             if event.button() == Qt.MouseButton.LeftButton:
                 #local_pos = event.position()
+                # Do better hear, search for which axis!
                 axes = self.figure.get_axes()
                 if len(axes) > 0:
                     set_active_figure(self.name, self.figure.get_axes()[0])
@@ -57,14 +61,13 @@ class MplDockWidget(QDockWidget):
 
         super().mousePressEvent(event)
 
-    def closeEvent(self, event: QCloseEvent):
-        global active_figure
-        global active_axis
+    def close_window (self):
         self.closing = True
-        if self.figure == active_figure:
-            if active_axis and active_axis.get_figure() == self.figure:
-                active_axis = None
-            active_figure = None
+        close_window_callback(self.name)
+        self.close()
+        
+    def closeEvent(self, event: QCloseEvent):
+        self.closing = True
         super().closeEvent(event)
 
 class MainWindow(QMainWindow):

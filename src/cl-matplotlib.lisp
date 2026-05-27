@@ -17,7 +17,8 @@
    #:set-window-style
    #:set-figure-active
    #:close-figure
-   #:figure-is-open)
+   #:figure-is-open
+   #:add-subplot)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -93,6 +94,9 @@
 (defun get-figure (figure-name)
   (gethash figure-name *active-figures*))
 
+(defun delete-figure (figure-name)
+  (remhash figure-name *active-figures*))
+
 (defun register-new-figure (figure-name figure-handle &optional current-axis layout)
   (assert (not (get-figure figure-name)) nil "Creating a new figure with same name as existing figure")
   (let ((fig (make-figure :handle figure-handle :axes nil :current-axis current-axis
@@ -152,7 +156,8 @@
     t))
 
 (defun close-figure (figure)
-  (warn "Implement me"))
+  (declare (type figure figure))
+  (pycall (pyslot-value (pyslot-value (figure-handle figure) "figure") "shutdown")))
 
 (defun add-rectangle (x y w h &key (ax (gca)) (color "r"))
   (assert ax nil "No current axis")
@@ -225,7 +230,12 @@
   "Call this to start the main gui loop"
   (start-up/internal)
   (py4cl2::raw-py-exec/no-return "import PyQt6_cl_matplotlib; PyQt6_cl_matplotlib.start_app(try_process_message);")
-  (py4cl2:pycall "PyQt6_cl_matplotlib.set_callback" (lambda (fig-name axis) (set-active-figure (get-figure fig-name)) (set-active-axis-handle axis)))
+  (py4cl2:pycall "PyQt6_cl_matplotlib.set_callbacks"
+                 (lambda (fig-name axis)
+                   (set-active-figure (get-figure fig-name))
+                   (set-active-axis-handle axis))
+                 (lambda (fig-name)
+                   (delete-figure fig-name)))
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
