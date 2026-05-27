@@ -282,13 +282,15 @@
       (setf (figure-axes figure) (delete ax (figure-axes figure)))
       (pymethod (figure-handle figure) "delaxes" (axis-handle ax)))))
         
-(defun plot-errorbar (x x+ x- y y+ y- &key (fmt "b-") ax)
+(defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") ax)
   (unless *loop-started* (start-loop))
   (setf ax (get-axis! ax "Errorbar plot demo"))
   (pymethod (axis-handle ax) "errorbar" x y
             :yerr (list y- y+)
             :xerr (list x- x+)
-            :fmt fmt
+            :linestyle linestyle
+            :markeredgecolor color
+            :marker marker
             :capsize 3.0)
   (draw-axis ax)
   ax)
@@ -301,11 +303,14 @@
   "May create a new figure.  Always returns an axis."
   (or ax (gca figure-title)))
 
-(defun plot-xy-data (x y &key (fmt "k.") ax)
+(defun plot-xy-data (x y &key linestyle color (marker "o") ax)
   (unless *loop-started* (start-loop))
   (when (and x y)
     (setf ax (get-axis! ax "XY plot demo"))
-    (pymethod (axis-handle ax) "plot" x y fmt)
+    (pymethod (axis-handle ax) "plot" x y
+              :linestyle linestyle
+              :color color
+              :marker marker)
     (draw-axis ax)
     ax))
 
@@ -362,7 +367,7 @@
   (pymethod (axis-handle ax) "set_zlim" z0 z1)
   (when draw (draw-axis ax)))
 
-(defun plot-random-points (&key (N 10) (fmt "k.") (errorbars t) (ax (gca)))
+(defun plot-random-points (&key (N 10) (marker ".") (linestyle "-") (color "k") (errorbars t) (ax (gca)))
   (labels ((rand (&optional (scale 10d0))
              (loop repeat N collect (- (random scale) (/ scale 2d0))))
            (prand (&optional (scale 1d0))
@@ -371,8 +376,10 @@
             (if errorbars
                 (plot-errorbar (rand) (prand) (prand)
                                (rand) (prand) (prand)
-                               :fmt fmt :ax ax)
-                (plot-xy-data (rand) (rand) :fmt fmt :ax ax))))
+                               :marker marker :linestyle linestyle :color color
+                               :ax ax)
+                (plot-xy-data (rand) (rand) :marker marker :linestyle linestyle
+                                            :color color :ax ax))))
       (xlabel "position ($\\mu m$)" :ax ax)
       (ylabel "Resistance ($\\Omega$)" :ax ax)
       (title "My happy e$\\chi$periment" :ax ax)
