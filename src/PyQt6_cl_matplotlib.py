@@ -35,7 +35,7 @@ class MplDockWidget(QDockWidget):
         # self.setWindowFlag(Qt.WindowType.Tool)
         # still steals focus when set to floating
         self.setWindowTitle(title)
-        layout = QVBoxLayout(parent)
+        layout = QVBoxLayout()
         self.closing = False
         self.figure = Figure()
         self.figure.shutdown = self.close_window
@@ -69,6 +69,7 @@ class MplDockWidget(QDockWidget):
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
+        print(f"Got {event}") 
         if event.key() == Qt.Key.Key_W & Qt.KeyboardModifier.ControlModifier:
             self.close_window()
         else:
