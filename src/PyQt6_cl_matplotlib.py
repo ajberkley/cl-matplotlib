@@ -29,12 +29,17 @@ def set_callbacks (activate_figure_callback, close_window_func):
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        # self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        # self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        # self.setWindowFlag(Qt.WindowType.Tool)
+        # still steals focus when set to floating
         self.setWindowTitle(title)
         layout = QVBoxLayout(parent)
         self.closing = False
         self.figure = Figure()
         self.figure.shutdown = self.close_window
+        self.figure.dockwidget = self
         self.canvas = FigureCanvas(self.figure)
         self.name = title
         def update_active_figure (event):
@@ -63,6 +68,12 @@ class MplDockWidget(QDockWidget):
 
         super().mousePressEvent(event)
 
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_W & Qt.KeyboardModifier.ControlModifier:
+            self.close_window()
+        else:
+            super().keyPressEvent(event)
+
     def close_window (self):
         self.closing = True
         close_window_callback(self.name)
@@ -76,13 +87,13 @@ class MplDockWidget(QDockWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setWindowTitle("Matplotlib workbench")
         self.resize(800, 600)
 
 main_window = None
 
-def NewFigure (title="Hello"):
+def NewFigure (title="Hello", docked=True):
     # Return a figure
     global main_window
     widget = MplDockWidget(title=f"{title}", parent=main_window)

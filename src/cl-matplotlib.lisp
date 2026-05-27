@@ -14,7 +14,6 @@
    #:zlabel
    #:tri-surf
    #:new-figure
-   #:set-window-style
    #:set-figure-active
    #:close-figure
    #:figure-is-open
@@ -26,7 +25,8 @@
    #:clear-figure-tracking
    #:*active-figures*
    #:set-active-figure
-   #:delete-figure)
+   #:delete-figure
+   #:*current-figure*)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -164,12 +164,15 @@
     (assert figure nil "Figure with name ~A does not exist" figure-name)
     (setf *current-figure* figure)))
 
-(defun set-window-style (figure style)
-  (declare (ignorable figure))
-  (when (string= style "docked")
-    (warn "Starting docked not supported yet"))
-  (when (string= style "normal")
-    t))
+(defun set-window-style/matplotlib (style)
+  ;; BUGS:
+  ;;  when setting NORMAL it steals mouse focus
+  ;;  if has never been docked in main window will not redock
+  (assert (member style '("docked" "normal") :test 'string=))
+  (let ((figure *current-figure*))
+    (when figure
+      (let ((widget (pyslot-value (figure-handle *current-figure*) "dockwidget")))
+        (pymethod widget "setFloating" (if (string= style "normal") t nil))))))
 
 (defun close-figure (figure)
   (declare (type figure figure))
