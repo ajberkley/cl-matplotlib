@@ -13,7 +13,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QVBoxLayout, QWidget
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QMouseEvent, QCloseEvent
+from PyQt6.QtGui import QMouseEvent, QCloseEvent, QKeyEvent
 
 set_active_figure = None
 close_window_callback = None
