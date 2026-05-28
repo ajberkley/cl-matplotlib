@@ -104,7 +104,7 @@ class MainWindow(QMainWindow):
     def maybe_hide(self):
         child_objects = main_window.children()
         # end up with a rubberband object that we need to kill
-        important_children = [c for c in child_objects if not(isinstance(c, QRubberBand) or isinstance(c, QLayout))]
+        important_children = [c for c in child_objects if isinstance(c, MplDockWidget)]
         if len(important_children) == 0:
             self.setVisible(False)
 
