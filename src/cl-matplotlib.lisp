@@ -30,7 +30,8 @@
    #:scatter-3d
    #:save-preferred-size-figure/matplotlib
    #:find-next-color
-   #:get-used-colors)
+   #:get-used-colors
+   #:clear-figure)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -515,3 +516,9 @@
                  (setf colors *color-set*)))
          (get-used-colors axis))
     (first colors)))
+
+(defun clear-figure (&optional (figure *current-figure*))
+  (when figure
+    (pymethod (figure-handle figure) "clf")
+    (setf (figure-current-axis figure) nil)
+    (setf (figure-axes figure) nil)))
