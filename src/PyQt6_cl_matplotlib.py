@@ -141,7 +141,9 @@ def start_app (try_process_message):
     global main_window
     print("Starting!")
     matplotlib.use("QtAgg")
-    app = QtWidgets.QApplication([""])
+    app = QtWidgets.QApplication(["MATLAB R2018b"])
+    # parameter to QApplication sets WM_CLASS, here I am matching a local
+    # override to prevent focus stealing
     main_window = MainWindow()
     main_window.show()
     timer = QTimer()
