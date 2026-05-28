@@ -26,7 +26,8 @@
    #:set-active-figure
    #:delete-figure
    #:*current-figure*
-   #:set-window-style/matplotlib)
+   #:set-window-style/matplotlib
+   #:scatter-3d)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -332,6 +333,15 @@
     (draw-axis ax)
     ax))
 
+(defun scatter-3d (x y z &key linestyle color (marker "o") ax)
+  (unless *loop-started* (start-loop))
+  (when (and x y z)
+    (pyexec "import matplotlib")
+    (pyexec "from mpl_toolkits.mplot3d import Axes3D")
+    (let* ((fig (unless ax (or *current-figure* (new-figure "Scatter 3D"))))
+           (ax (or ax (add-subplot fig 111 "3d"))))
+    (pymethod (axis-handle ax) "scatter" x y z :c (or color "b") :linestyle linestyle :marker marker))))
+
 (defun xlabel (string &key (ax (gca)) (draw t))
   "Text in $ $ will be interpreted as LaTex. Don't forget \\"
   ;; (xlabel "Resistance ($\\Omega$)")
@@ -449,9 +459,9 @@
     (let ((ax (surf-data x y z)))
       (title "Noisy Sync" :ax ax))))
 
-(defun save-preferred-size-figure
+(defun save-preferred-size-figure/matplotlib
     (filename &key (width-pixels 2000) (height-pixels 1440) (dpi 200) eps?
-                name-prefix name-suffix fig-handle)
+                name-prefix name-suffix fig-handle sub-dir)
   ;; I think if name is specified it uses it, otherwise it
   ;; puts name-prefix figure-name name-suffix with some fiddling,
   ;; and tidying see build-figname
@@ -459,6 +469,7 @@
   (assert (not name-prefix))
   (assert (not name-suffix))
   (assert (not fig-handle))
+  (assert (not sub-dir))
   (let ((fig *current-figure*))
     (assert fig)
     (let ((old-size (pymethod (figure-handle fig) "get_size_inches")))
