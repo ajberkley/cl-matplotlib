@@ -448,3 +448,25 @@
                 (if (zerop p) 1d0 (+ (/ (sin p) p) (random 0.3d0)))))))
     (let ((ax (surf-data x y z)))
       (title "Noisy Sync" :ax ax))))
+
+(defun save-preferred-size-figure
+    (filename &key (width-pixels 2000) (height-pixels 1440) (dpi 200) eps?
+                name-prefix name-suffix fig-handle)
+  ;; I think if name is specified it uses it, otherwise it
+  ;; puts name-prefix figure-name name-suffix with some fiddling,
+  ;; and tidying see build-figname
+  (assert filename)
+  (assert (not name-prefix))
+  (assert (not name-suffix))
+  (assert (not fig-handle))
+  (let ((fig *current-figure*))
+    (assert fig)
+    (let ((old-size (pymethod (figure-handle fig) "get_size_inches")))
+      (pymethod (figure-handle fig) "set_size_inches" (round width-pixels dpi) (round height-pixels dpi))
+      (pymethod (figure-handle fig) "savefig" (if (search ".png" filename)
+                                                  filename
+                                                  (format nil "~a.~a" filename
+                                                          (if eps? "eps" "png")))
+                :dpi dpi)
+      (pymethod (figure-handle fig) "set_size_inches" old-size))))
+
