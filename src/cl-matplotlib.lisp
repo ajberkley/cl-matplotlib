@@ -27,7 +27,10 @@
    #:delete-figure
    #:*current-figure*
    #:set-window-style/matplotlib
-   #:scatter-3d)
+   #:scatter-3d
+   #:save-preferred-size-figure/matplotlib
+   #:find-next-color
+   #:get-used-colors)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -40,6 +43,7 @@
 ;; venv support
 ;;(setf (py4cl2:config-var 'py4cl2:pycmd) "/home/tester/ajb/TYPHON-USER-DEV/cl-matplotlib/.venv/bin/python")
 (setf (py4cl2:config-var 'py4cl2:numpy-pickle-lower-bound) 300)
+(save-config)
 
 ;; You need to install all the relevant python packages
 ;;  matplotlib
@@ -194,7 +198,9 @@
   ;; TODO check and see if a subplot already exists in the figure-axes?
   (let ((ax (pymethod (figure-handle figure) "add_subplot" subplot-id
                       :projection projection)))
-    (set-active-axis (make-axis :handle ax :figure figure :subplot subplot-id))))
+    (let ((new-axis (make-axis :handle ax :figure figure :subplot subplot-id)))
+      (push new-axis (figure-axes figure))
+      (set-active-axis new-axis))))
 
 (defun lots-of-patches (&optional (N 50000))
   (let* ((fig (new-figure "Patch demo"))
@@ -297,13 +303,14 @@
     (let ((ax (find-if (lambda (ax) (eql (axis-subplot ax) subplot-id))
                        (figure-axes figure))))
       (when ax
-        ;;(format t "Deleting figure ~A axis ~A~%" figure ax)
-        (setf (figure-axes figure) (delete ax (figure-axes figure)))
-        (pymethod (figure-handle figure) "delaxes" (axis-handle ax))))))
+        (pymethod (axis-handle ax) "cla")
+        (draw-axis ax)))))
         
 (defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") ax)
   (unless *loop-started* (start-loop))
   (setf ax (get-axis! ax "Errorbar plot demo"))
+  (unless color
+    (setf color (find-next-color ax)))
   (pymethod (axis-handle ax) "errorbar" x y
             :yerr (list y- y+)
             :xerr (list x- x+)
@@ -326,6 +333,8 @@
   (unless *loop-started* (start-loop))
   (when (and x y)
     (setf ax (get-axis! ax "XY plot demo"))
+    (unless color
+      (setf color (find-next-color ax)))
     (pymethod (axis-handle ax) "plot" x y
               :linestyle linestyle
               :color color
@@ -481,3 +490,24 @@
                 :dpi dpi)
       (pymethod (figure-handle fig) "set_size_inches" old-size))))
 
+(defun get-used-colors (axis)
+  (declare (type axis axis))
+  (let ((children (pymethod (axis-handle axis) "get_children"))
+        (colors))
+    (map nil (lambda (child)
+               (when (pycall "isinstance" child '|matplotlib.lines.Line2D|)
+                 (pushnew (pymethod child "get_color") colors :test 'equal)
+                 (pushnew (pymethod child "get_markeredgecolor") colors :test 'equal)
+                 (pushnew (pymethod child "get_markerfacecolor") colors :test 'equal)))
+         children)
+    colors))
+
+(defvar *color-set* '("b" "r" "g" "k" "m" "c" "y"))
+(defun find-next-color (axis)
+  (let ((colors *color-set*)) ;; switch to *category20*
+    (map nil (lambda (color)
+               (setf colors (remove color colors :test 'equal))
+               (unless colors
+                 (setf colors *color-set*)))
+         (get-used-colors axis))
+    (first colors)))
