@@ -57,6 +57,7 @@ class MplDockWidget(QDockWidget):
         self.setWidget(self.container)
         self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.canvas.mpl_connect('key_press_event', self.on_key_press)
+        self.figure.set_tight_layout(True)
         #self.canvas.setFocus()
         
     def on_key_press(self, event):

@@ -196,11 +196,15 @@
 (defun add-subplot (figure &optional (subplot-id 111) (projection "rectilinear"))
   "Returns an `AXIS' object"
   ;; TODO check and see if a subplot already exists in the figure-axes?
-  (let ((ax (pymethod (figure-handle figure) "add_subplot" subplot-id
-                      :projection projection)))
-    (let ((new-axis (make-axis :handle ax :figure figure :subplot subplot-id)))
-      (push new-axis (figure-axes figure))
-      (set-active-axis new-axis))))
+  (unless figure (setf figure (new-figure)))
+  (let ((maybe-ax (find subplot-id (figure-axes figure) :key #'axis-subplot :test 'equal)))
+    (if maybe-ax
+        (set-active-axis maybe-ax)
+        (let* ((ax (pymethod (figure-handle figure) "add_subplot" subplot-id
+                             :projection projection))
+               (new-axis (make-axis :handle ax :figure figure :subplot subplot-id)))
+          (push new-axis (figure-axes figure))
+          (set-active-axis new-axis)))))
 
 (defun lots-of-patches (&optional (N 50000))
   (let* ((fig (new-figure "Patch demo"))
