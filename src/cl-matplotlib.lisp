@@ -69,8 +69,10 @@
 ;; (defpymodule "matplotlib" nil :lisp-package "MPL")
 
 (defun draw-axis (ax)
-  (let* ((fig (axis-figure ax))
-	 (canvas (pyslot-value (figure-handle fig) "canvas")))
+  (draw-figure (axis-figure ax)))
+
+(defun draw-figure (fig)
+  (let ((canvas (pyslot-value (figure-handle fig) "canvas")))
     (pymethod canvas "draw_idle")
     (values)))
 
@@ -141,7 +143,8 @@
   ;; ON THE PYTHON SIDE, WTF?
   (let* ((fig *current-figure*))
     (let ((ax (find axis-handle (figure-axes fig) :key #'axis-handle :test
-                    (lambda (a b) (pyeval a " == " b))))) ;; slow!
+                    (lambda (a b)
+                      (pyeval a " == " b))))) ;; slow!
       ;; There may not be an axis if we have never created a plot on it,
       ;; like a button, for example...?
       (when ax
@@ -149,7 +152,6 @@
     (values)))
 
 (defun set-new-active-axis (ax)
-  ;;(cl-user::log-for cl-user::info "Setting ~A as current axis" ax)
   (let ((fig (axis-figure ax)))
     (setf *current-figure* fig)
     (pushnew ax (figure-axes fig))
@@ -515,4 +517,5 @@
   (when figure
     (pymethod (figure-handle figure) "clf")
     (setf (figure-current-axis figure) nil)
-    (setf (figure-axes figure) nil)))
+    (setf (figure-axes figure) nil)
+    (draw-figure figure)))

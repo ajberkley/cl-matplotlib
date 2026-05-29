@@ -46,6 +46,7 @@ class MplDockWidget(QDockWidget):
         self.canvas = FigureCanvas(self.figure)
         self.name = title
         def update_active_figure (event):
+            print(f"update_active_figure {event}")
             if not self.closing:
                 set_active_figure(self.name, event.inaxes)
         self.canvas.mpl_connect('button_press_event', update_active_figure)
@@ -69,6 +70,7 @@ class MplDockWidget(QDockWidget):
     def mousePressEvent(self, event: QMouseEvent):
         # This handles mouse click events outside the active matplotlib
         # areas.
+        print("mousepressevent")
         if not self.closing:
             if event.button() == Qt.MouseButton.LeftButton:
                 #local_pos = event.position()
@@ -80,7 +82,7 @@ class MplDockWidget(QDockWidget):
                     set_active_figure(self.name, None)
 
         super().mousePressEvent(event)
-
+        
     def clean_up_details (self):
         self.closing = True
         close_window_callback(self.name)
