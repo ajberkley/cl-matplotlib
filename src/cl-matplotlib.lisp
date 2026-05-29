@@ -142,13 +142,14 @@
   ;; UGH PYTHON REFERENCES ARE NOT DE-DUPLICATED
   ;; ON THE PYTHON SIDE, WTF?
   (let* ((fig *current-figure*))
-    (let ((ax (find axis-handle (figure-axes fig) :key #'axis-handle :test
-                    (lambda (a b)
-                      (pyeval a " == " b))))) ;; slow!
-      ;; There may not be an axis if we have never created a plot on it,
-      ;; like a button, for example...?
-      (when ax
-        (setf (figure-current-axis fig) ax)))
+    (when fig
+      (let ((ax (find axis-handle (figure-axes fig) :key #'axis-handle :test
+                      (lambda (a b)
+                        (pyeval a " == " b))))) ;; slow!
+        ;; There may not be an axis if we have never created a plot on it,
+        ;; like a button, for example...?
+        (when ax
+          (setf (figure-current-axis fig) ax))))
     (values)))
 
 (defun set-new-active-axis (ax)
@@ -315,9 +316,9 @@
   (pymethod (axis-handle ax) "errorbar" x y
             :yerr (list y- y+)
             :xerr (list x- x+)
-            :linestyle linestyle
-            :markeredgecolor color
-            :marker marker
+            :linestyle (or linestyle "None")
+            :markeredgecolor (or color "None")
+            :marker (or marker "None")
             :capsize 3.0)
   (draw-axis ax)
   ax)
@@ -337,9 +338,9 @@
     (unless color
       (setf color (find-next-color ax)))
     (pymethod (axis-handle ax) "plot" x y
-              :linestyle linestyle
-              :color color
-              :marker marker)
+              :linestyle (or linestyle "None")
+              :color (or color "None")
+              :marker (or marker "None"))
     (draw-axis ax)
     ax))
 
