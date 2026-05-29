@@ -19,8 +19,7 @@
    #:add-subplot
    #:get-figure
    #:start-loop
-   #:defun
-   #:cla
+   #:cla/matplotlib
    #:clear-figure-tracking
    #:*active-figures*
    #:set-active-figure
@@ -111,7 +110,6 @@
   (gethash figure-name *active-figures*))
 
 (defun delete-figure (figure-name)
-  ;;(cl-user::log-for cl-user::info "Deleting figure ~A" figure-name)
   (let ((fig (gethash figure-name *active-figures*)))
     (when fig
       (remhash figure-name *active-figures*)
@@ -132,7 +130,6 @@
   (push new-axis (figure-axes figure)))
 
 (defun set-active-figure (figure)
-  ;;(cl-user::log-for cl-user::info "Setting ~A as current figure" figure)
   (setf *current-figure* figure))
 
 (defun figure-is-open (figure-name)
@@ -143,9 +140,8 @@
   ;; UGH PYTHON REFERENCES ARE NOT DE-DUPLICATED
   ;; ON THE PYTHON SIDE, WTF?
   (let* ((fig *current-figure*))
-    ;;(cl-user::log-for cl-user::info "Searching for ~A in ~A~%" axis-handle (figure-axes fig))
     (let ((ax (find axis-handle (figure-axes fig) :key #'axis-handle :test
-                    (lambda (a b) (pyeval a "==" b))))) ;; slow!
+                    (lambda (a b) (pyeval a " == " b))))) ;; slow!
       ;; There may not be an axis if we have never created a plot on it,
       ;; like a button, for example...?
       (when ax
@@ -303,13 +299,11 @@
     (let ((ax (figure-current-axis fig)))
       (or ax (setf ax (add-subplot fig))))))
 
-(defun cla (&key (figure *current-figure*) (subplot-id 111))
-  (when figure
-    (let ((ax (find-if (lambda (ax) (eql (axis-subplot ax) subplot-id))
-                       (figure-axes figure))))
-      (when ax
-        (pymethod (axis-handle ax) "cla")
-        (draw-axis ax)))))
+(defun cla/matplotlib (&key (figure *current-figure*))
+  (let ((ax (and figure (figure-current-axis figure))))
+    (when ax
+      (pymethod (axis-handle ax) "cla")
+      (draw-axis ax))))
         
 (defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") ax)
   (unless *loop-started* (start-loop))
