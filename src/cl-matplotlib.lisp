@@ -34,7 +34,9 @@
    #:get-used-colors
    #:clear-figure
    #:find-figure-with-window-title
-   #:get-unique-figure-number)
+   #:get-unique-figure-number
+   #:*suppress-redraw*
+   #:draw-figure)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -72,13 +74,18 @@
 ;; (defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
 ;; (defpymodule "matplotlib" nil :lisp-package "MPL")
 
+(defvar *suppress-redraw* nil
+  "When T draw-axis and draw-figure will do nothing")
+
 (defun draw-axis (ax)
-  (draw-figure (axis-figure ax)))
+  (unless *suppress-redraw*
+    (draw-figure (axis-figure ax))))
 
 (defun draw-figure (fig)
-  (let ((canvas (pyslot-value (figure-handle fig) "canvas")))
-    (pymethod canvas "draw_idle")
-    (values)))
+  (unless *suppress-redraw*
+    (let ((canvas (pyslot-value (figure-handle fig) "canvas")))
+      (pymethod canvas "draw_idle")
+      (values))))
 
 (defstruct axis
   (handle nil) ;; a python handle
