@@ -44,10 +44,10 @@ class MplDockWidget(QDockWidget):
         self.figure = Figure()
         self.figure.dockwidget = self
         self.canvas = FigureCanvas(self.figure)
-        self.name = title
+        self.window_title = title
         def update_active_figure (event):
             if not self.closing:
-                set_active_figure(self.name, event.inaxes)
+                set_active_figure(self.unique_figure_id, event.inaxes)
         self.canvas.mpl_connect('button_press_event', update_active_figure)
         self.toolbar = NavigationToolbar(self.canvas, self)
         layout.addWidget(self.toolbar)
@@ -75,15 +75,15 @@ class MplDockWidget(QDockWidget):
                 # Do better hear, search for which axis!
                 axes = self.figure.get_axes()
                 if len(axes) > 0:
-                    set_active_figure(self.name, self.figure.get_axes()[0])
+                    set_active_figure(self.unique_figure_id, self.figure.get_axes()[0])
                 else:
-                    set_active_figure(self.name, None)
+                    set_active_figure(self.unique_figure_id, None)
 
         super().mousePressEvent(event)
         
     def clean_up_details (self):
         self.closing = True
-        close_window_callback(self.name)
+        close_window_callback(self.unique_figure_id)
         main_window.removeDockWidget(self)
         self.deleteLater()
         
@@ -111,13 +111,13 @@ class MainWindow(QMainWindow):
 
 main_window = None
 
-def NewFigure (title="Hello", docked=True):
+def NewFigure (title="Hello", id=123, docked=True):
     # Return a figure
     global main_window
     if main_window.isVisible() == False:
         main_window.setVisible(True)
     widget = MplDockWidget(title=f"{title}", parent=main_window)
-    widget.name = title
+    widget.unique_figure_id = id
     main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, widget)
     return widget.figure
 

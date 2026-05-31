@@ -14,6 +14,8 @@
    #:zlabel
    #:tri-surf
    #:new-figure
+   #:figure-window-title
+   #:figure-number
    #:set-figure-active
    #:figure-is-open
    #:add-subplot
@@ -30,7 +32,9 @@
    #:save-preferred-size-figure/matplotlib
    #:find-next-color
    #:get-used-colors
-   #:clear-figure)
+   #:clear-figure
+   #:find-figure-with-window-title
+   #:get-unique-figure-number)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -83,14 +87,15 @@
 
 (defmethod print-object ((obj axis) stream)
   (print-unreadable-object (obj stream)
-    (format stream "AXIS of ~A" (figure-name (axis-figure obj)))))
+    (let ((figure (axis-figure obj)))
+      (format stream "AXIS of #~A '~A'" (figure-number figure) (figure-window-title figure)))))
 
 (defstruct figure
   (handle nil) ;; a python handle
   (axes nil :type list) ;; a list of axes
   (current-axis nil :type (or null axis)) ;; current axis of the figure
   (layout-info nil) ;; for automatic tiled layout and stuff
-  (name nil) ;; This is the window title
+  (window-title "" :type string)
   (number (- (expt 2 32) 1) :type (unsigned-byte 32))) ;; unique session identifier
 
 (defvar *current-figure* nil
@@ -108,34 +113,45 @@
   (setf *current-figure* nil)
   (clrhash *active-figures*))
 
-(defun get-figure (figure-name)
-  (gethash figure-name *active-figures*))
+(defun get-figure (figure-number)
+  (gethash figure-number *active-figures*))
 
-(defun delete-figure (figure-name)
-  (let ((fig (gethash figure-name *active-figures*)))
+(defun find-figure-with-window-title (window-title)
+  (maphash (lambda (figure-number figure)
+             (declare (ignore figure-number))
+             (when (string= (figure-window-title figure) window-title)
+               (return-from find-figure-with-window-title figure)))
+  *active-figures*)
+  nil)
+
+(defun delete-figure (figure-number)
+  (let ((fig (gethash figure-number *active-figures*)))
     (when fig
-      (remhash figure-name *active-figures*)
+      (remhash figure-number *active-figures*)
       (ignore-errors (close-figure& fig))))
   (let ((current-figure *current-figure*))
     (when (and current-figure
-               (equal figure-name (figure-name current-figure)))
+               (equal figure-number (figure-number current-figure)))
       (setf *current-figure* nil))))
 
-(defun register-new-figure (figure-name figure-handle &optional current-axis layout)
-  (assert (not (get-figure figure-name)) nil "Creating a new figure with same name as existing figure")
+(defun register-new-figure (figure-number window-title figure-handle
+                            &optional layout current-axis)
+  (assert (not (get-figure figure-number)) nil
+          "Creating a new figure with same ID as existing figure")
   (let ((fig (make-figure :handle figure-handle :axes nil :current-axis current-axis
-                          :layout-info layout :name figure-name)))
-    (setf (gethash figure-name *active-figures*) fig)
+                          :layout-info layout :window-title window-title :number figure-number)))
+    (setf (gethash figure-number *active-figures*) fig)
     fig))
 
 (defun register-new-axis (figure new-axis)
   (push new-axis (figure-axes figure)))
 
 (defun set-active-figure (figure)
+  (declare (type figure figure))
   (setf *current-figure* figure))
 
-(defun figure-is-open (figure-name)
-  (gethash figure-name *active-figures*))
+(defun figure-is-open (figure-number)
+  (gethash figure-number *active-figures*))
 
 (defun set-active-axis-handle (axis-handle)
   "This is a callback from python"
@@ -158,15 +174,22 @@
     (pushnew ax (figure-axes fig))
     (setf (figure-current-axis fig) ax)))
 
-(defun new-figure (&optional (figure-name "default-figure") (layout "normal"))
-  (assert (not (get-figure figure-name)) nil
-          "Figure with name ~A already exists" figure-name)
-  (let ((figure-handle (pycall "PyQt6_cl_matplotlib.NewFigure" figure-name)))
-    (setf *current-figure* (register-new-figure figure-name figure-handle nil layout))))
+(defvar *figure-counter* (list 0))
 
-(defun set-figure-active (figure-name)
-  (let ((figure (get-figure figure-name)))
-    (assert figure nil "Figure with name ~A does not exist" figure-name)
+(defun get-unique-figure-number ()
+  (sb-ext:atomic-incf (car *figure-counter*)))
+  
+(defun new-figure (&key (window-title "default-figure")
+                     (figure-number (get-unique-figure-number)) (layout "normal"))
+  (assert (not (get-figure figure-number)) nil
+          "Figure with number ~A already exists" figure-number)
+  (let ((figure-handle (pycall "PyQt6_cl_matplotlib.NewFigure" window-title figure-number
+                               (if (string= layout "docked") t nil))))
+    (setf *current-figure* (register-new-figure figure-number window-title figure-handle layout))))
+
+(defun set-figure-active (figure-number)
+  (let ((figure (get-figure figure-number)))
+    (assert figure nil "Figure with name ~A does not exist" figure-number)
     (setf *current-figure* figure)))
 
 (defun set-window-style/matplotlib (style)
@@ -207,7 +230,7 @@
           (set-new-active-axis new-axis)))))
 
 (defun lots-of-patches (&optional (N 50000))
-  (let* ((fig (new-figure "Patch demo"))
+  (let* ((fig (new-figure :window-title "Patch demo"))
          (ax (add-subplot fig)))
     (labels ((random-array (range)
                (coerce (loop repeat N collect (random range))
@@ -234,8 +257,9 @@
             (loop repeat 3 collect (random 10)))
   (draw-axis ax))
 
-(defun show-callback-demo (&optional (figure-name "Callback demo"))
-  (let* ((fig (or (get-figure figure-name) (new-figure figure-name)))
+(defun show-callback-demo (&optional (window-title "Callback demo"))
+  (let* ((fig (or (find-figure-with-window-title window-title)
+                  (new-figure :window-title window-title)))
          (ax (add-subplot fig)))
     (pymethod (axis-handle ax) "plot" '(1 2 3) '(3 1 2))
     (pymethod (figure-handle fig) "subplots_adjust" :bottom 0.2)
@@ -253,7 +277,7 @@
                      (pystop)) (start-loop))
   (show-callback-demo)
   (surf-random-data)
-  (new-figure "Errorbar demo")
+  (new-figure :window-title "Errorbar demo")
   (plot-random-points :ax nil))
 
 (defun start-loop ()
@@ -261,11 +285,11 @@
   (start-up/internal)
   (py4cl2::raw-py-exec/no-return "import PyQt6_cl_matplotlib; PyQt6_cl_matplotlib.start_app(try_process_message);")
   (py4cl2:pycall "PyQt6_cl_matplotlib.set_callbacks"
-                 (lambda (fig-name axis)
-                   (set-active-figure (get-figure fig-name))
+                 (lambda (unique-figure-id axis)
+                   (set-active-figure (get-figure unique-figure-id))
                    (set-active-axis-handle axis))
-                 (lambda (fig-name)
-                   (delete-figure fig-name)))
+                 (lambda (unique-figure-id)
+                   (delete-figure unique-figure-id)))
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
@@ -288,17 +312,17 @@
   (py4cl2:export-function (lambda (x) (/ (exp (- (* x x)))
                                          (sqrt pi))) "lisp_gaussian"))
 
-(defun gcf (&optional (title "default-figure"))
+(defun gcf (&optional (window-title "default-figure"))
   "If title-provided, then will create a figure if one does not
  currently exist."
   (or *current-figure*
-      (new-figure title)))
+      (new-figure :window-title window-title)))
 
-(defun gca (&optional (figure-title-if-new "Default figure title"))
+(defun gca (&optional (window-title-if-new "Default figure title"))
   "Return last used axis.  If no figure exists, create a new one and a new axis"
   (let ((fig *current-figure*))
     (when (not fig)
-      (setf fig (new-figure figure-title-if-new)))
+      (setf fig (new-figure :window-title window-title-if-new)))
     (let ((ax (figure-current-axis fig)))
       (or ax (setf ax (add-subplot fig))))))
 
@@ -349,7 +373,7 @@
   (when (and x y z)
     (pyexec "import matplotlib")
     (pyexec "from mpl_toolkits.mplot3d import Axes3D")
-    (let* ((fig (unless ax (or *current-figure* (new-figure "Scatter 3D"))))
+    (let* ((fig (unless ax (or *current-figure* (new-figure :window-title "Scatter 3D"))))
            (ax (or ax (add-subplot fig 111 "3d"))))
     (pymethod (axis-handle ax) "scatter" x y z :c (or color "b") :linestyle linestyle :marker marker))))
 
@@ -430,7 +454,7 @@
 (defun surf-data (x y z)
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
-  (let* ((fig (new-figure "3D Plot Demo"))
+  (let* ((fig (new-figure :window-title "3D Plot Demo"))
          (ax (add-subplot fig 111 "3d"))
          (colormap (pyeval "matplotlib.cm.coolwarm"))
          (surf (pymethod (axis-handle ax) "plot_surface" x y z
@@ -443,7 +467,7 @@
 (defun tri-surf (x y z &key fig)
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
-  (let* ((fig (or fig (new-figure "3D Plot Demo")))
+  (let* ((fig (or fig (new-figure :window-title "3D Plot Demo")))
          (ax (figure-current-axis fig)))
     ;; TODO FIXME
     (when ax (pymethod ax "remove")) ;; in case it isn't 3D
@@ -474,7 +498,7 @@
     (filename &key (width-pixels 2000) (height-pixels 1440) (dpi 200) eps?
                 name-prefix name-suffix fig-handle sub-dir)
   ;; I think if name is specified it uses it, otherwise it
-  ;; puts name-prefix figure-name name-suffix with some fiddling,
+  ;; puts name-prefix figure-window-title name-suffix with some fiddling,
   ;; and tidying see build-figname
   (assert filename)
   (assert (not name-prefix))
@@ -515,6 +539,7 @@
     (first colors)))
 
 (defun clear-figure (&optional (figure *current-figure*))
+  (declare (type (or null figure) figure))
   (when figure
     (pymethod (figure-handle figure) "clf")
     (setf (figure-current-axis figure) nil)
