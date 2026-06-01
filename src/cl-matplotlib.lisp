@@ -36,7 +36,8 @@
    #:find-figure-with-window-title
    #:get-unique-figure-number
    #:*suppress-redraw*
-   #:draw-figure)
+   #:draw-figure
+   #:add-colorbar)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -552,3 +553,17 @@
     (setf (figure-current-axis figure) nil)
     (setf (figure-axes figure) nil)
     (draw-figure figure)))
+
+(defun add-colorbar (colormap-min colormap-max
+                     &key (figure *current-figure*) (axis (figure-current-axis figure))
+                       (cmap "viridis") (clip t))
+  "Do this is you have not created your axis/plot with the :cmap key, that is
+ draw a fake colormap not connected to your data (if, for example, you did coloring
+ by hand)"
+  (let ((norm (pycall "matplotlib.colors.Normalize"
+                      :vmin colormap-min :vmax colormap-max :clip clip)))
+    (prog1
+        (py4cl2:pymethod (figure-handle figure) "colorbar"
+                         (py4cl2:pycall "matplotlib.cm.ScalarMappable" :cmap cmap :norm norm)
+                         :ax (axis-handle axis))
+      (draw-axis axis))))
