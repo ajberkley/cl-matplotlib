@@ -34,7 +34,6 @@
    #:get-unique-figure-number
    #:*suppress-redraw*
    #:draw-figure
-   #:get-colormap
    #:mpl/get-colormap-samples
    #:mpl/add-color-to-colormap
    #:mpl/get-colormap
