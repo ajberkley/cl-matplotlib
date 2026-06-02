@@ -562,7 +562,12 @@
                       :vmin colormap-min :vmax colormap-max :clip clip)))
     (prog1
         (py4cl2:pymethod (figure-handle figure) "colorbar"
-                         (py4cl2:pycall "matplotlib.cm.ScalarMappable" :cmap cmap :norm norm)
+                         (py4cl2:pycall "matplotlib.cm.ScalarMappable"
+                                        :cmap
+                                        (if (stringp cmap)
+                                            cmap
+                                            (py4cl2:pycall "matplotlib.colors.ListedColormap" cmap))
+                                        :norm norm)
                          :ax (axis-handle axis))
       (draw-axis axis))))
 
@@ -574,7 +579,7 @@
     (colormap new-color &key (resample-pts 256) (method :append))
   "Create a new colormap from python-object COLORMAP with new-color :append'ed or :prepend'ed to it.
  NEW-COLOR should be a sequence of length 3 of RGB or 4 of numbers RGBA (A is alpha)"
-  (let ((original-colors (mpl/get-colormap-samples colormap :num-pts resample-pts)))
+  (let ((original-colors (if (arrayp colormap) colormap (mpl/get-colormap-samples colormap :num-pts resample-pts))))
     (when (= (length new-color) 3) ;; upgrade to RGBA
       (setf new-color (list (elt new-color 0) (elt new-color 1)
                             (elt new-color 2) 1.0)))
