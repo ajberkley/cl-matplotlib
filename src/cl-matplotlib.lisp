@@ -16,15 +16,12 @@
    #:new-figure
    #:figure-window-title
    #:figure-number
-   #:set-figure-active
    #:figure-is-open
    #:add-subplot
    #:get-figure
    #:start-loop
-   #:cla/matplotlib
    #:clear-figure-tracking
    #:*active-figures*
-   #:set-active-figure
    #:delete-figure
    #:*current-figure*
    #:set-window-style/matplotlib
@@ -37,13 +34,18 @@
    #:get-unique-figure-number
    #:*suppress-redraw*
    #:draw-figure
-   #:add-colorbar)
+   #:get-colormap
+   #:mpl/get-colormap-samples
+   #:mpl/add-color-to-colormap
+   #:mpl/get-colormap
+   #:mpl/add-colorbar
+   #:mpl/set-figure-active
+   #:cla/mpl)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
 
  You need to use the version of py4cl2 from my repo"))
-
 
 (in-package :cl-matplotlib)
 
@@ -154,10 +156,6 @@
 (defun register-new-axis (figure new-axis)
   (push new-axis (figure-axes figure)))
 
-(defun set-active-figure (figure)
-  (declare (type figure figure))
-  (setf *current-figure* figure))
-
 (defun figure-is-open (figure-number)
   (gethash figure-number *active-figures*))
 
@@ -195,7 +193,7 @@
                                (if (string= layout "docked") t nil))))
     (setf *current-figure* (register-new-figure figure-number window-title figure-handle layout))))
 
-(defun set-figure-active (figure-number)
+(defun mpl/set-figure-active (figure-number)
   (let ((figure (get-figure figure-number)))
     (assert figure nil "Figure with name ~A does not exist" figure-number)
     (setf *current-figure* figure)))
@@ -294,7 +292,7 @@
   (py4cl2::raw-py-exec/no-return "import PyQt6_cl_matplotlib; PyQt6_cl_matplotlib.start_app(try_process_message);")
   (py4cl2:pycall "PyQt6_cl_matplotlib.set_callbacks"
                  (lambda (unique-figure-id axis)
-                   (set-active-figure (get-figure unique-figure-id))
+                   (mpl/set-figure-active unique-figure-id)
                    (set-active-axis-handle axis))
                  (lambda (unique-figure-id)
                    (delete-figure unique-figure-id)))
@@ -334,7 +332,7 @@
     (let ((ax (figure-current-axis fig)))
       (or ax (setf ax (add-subplot fig))))))
 
-(defun cla/matplotlib (&key (figure *current-figure*))
+(defun cla/mpl (&key (figure *current-figure*))
   (let ((ax (and figure (figure-current-axis figure))))
     (when ax
       (pymethod (axis-handle ax) "cla")
@@ -554,12 +552,12 @@
     (setf (figure-axes figure) nil)
     (draw-figure figure)))
 
-(defun add-colorbar (colormap-min colormap-max
+(defun mpl/add-colorbar (colormap-min colormap-max
                      &key (figure *current-figure*) (axis (figure-current-axis figure))
                        (cmap "viridis") (clip t))
   "Do this is you have not created your axis/plot with the :cmap key, that is
  draw a fake colormap not connected to your data (if, for example, you did coloring
- by hand)"
+ by hand).  Since this is a fake colormap CLIP is not important."
   (let ((norm (pycall "matplotlib.colors.Normalize"
                       :vmin colormap-min :vmax colormap-max :clip clip)))
     (prog1
@@ -567,3 +565,25 @@
                          (py4cl2:pycall "matplotlib.cm.ScalarMappable" :cmap cmap :norm norm)
                          :ax (axis-handle axis))
       (draw-axis axis))))
+
+(defun mpl/get-colormap (name)
+  "Returns a python-object"
+  (py4cl2:pyeval (format nil "matplotlib.colormaps['~A']" name)))
+
+(defun mpl/add-color-to-colormap
+    (colormap new-color &key (resample-pts 256) (method :append))
+  "Create a new colormap from python-object COLORMAP with new-color :append'ed or :prepend'ed to it.
+ NEW-COLOR should be a sequence of length 3 of RGB or 4 of numbers RGBA (A is alpha)"
+  (let ((original-colors (mpl/get-colormap-samples colormap :num-pts resample-pts)))
+    (when (= (length new-color) 3) ;; upgrade to RGBA
+      (setf new-color (list (elt new-color 0) (elt new-color 1)
+                            (elt new-color 2) 1.0)))
+    (pycall "matplotlib.colors.ListedColormap"
+            (ecase method
+              (:append (pycall "numpy.vstack" (list original-colors new-color)))
+              (:prepend (pycall "numpy.vstack" (list new-color original-colors)))))))
+
+(defun mpl/get-colormap-samples (colormap &key (num-pts 256))
+  "Takes a python-object COLORMAP, from say calling GET-COLORMAP.  Returns
+ a NUM-COLORMAP-PTS x 4 array of double-floats representing RGBA"
+  (pycall colormap (loop for i below num-pts collect i)))
