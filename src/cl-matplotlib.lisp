@@ -244,7 +244,8 @@
                                  :projection projection)))
                (new-axis (make-axis :handle ax :figure figure :subplot subplot-id)))
           (set-new-active-axis new-axis)
-          (draw-axis new-axis)))))
+          (draw-axis new-axis)
+          new-axis))))
 
 (defun lots-of-patches (&optional (N 50000))
   (let* ((fig (new-figure :window-title "Patch demo"))
