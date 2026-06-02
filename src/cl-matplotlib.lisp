@@ -234,10 +234,17 @@
   (let ((maybe-ax (find subplot-id (figure-axes figure) :key #'axis-subplot :test 'equal)))
     (if maybe-ax
         (setf (figure-current-axis figure) maybe-ax)
-        (let* ((ax (pymethod (figure-handle figure) "add_subplot" subplot-id
-                             :projection projection))
+        (let* ((ax (if (typep subplot-id 'sequence)
+                       (progn
+                         (assert (= (length subplot-id) 3))
+                         (pymethod (figure-handle figure) "add_subplot"
+                                   (elt subplot-id 0) (elt subplot-id 1) (elt subplot-id 2)
+                                   :projection projection))
+                       (pymethod (figure-handle figure) "add_subplot" subplot-id
+                                 :projection projection)))
                (new-axis (make-axis :handle ax :figure figure :subplot subplot-id)))
-          (set-new-active-axis new-axis)))))
+          (set-new-active-axis new-axis)
+          (draw-axis new-axis)))))
 
 (defun lots-of-patches (&optional (N 50000))
   (let* ((fig (new-figure :window-title "Patch demo"))
