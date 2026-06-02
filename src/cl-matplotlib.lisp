@@ -39,7 +39,8 @@
    #:mpl/get-colormap
    #:mpl/add-colorbar
    #:mpl/set-figure-active
-   #:cla/mpl)
+   #:cla/mpl
+   #:mpl/subplot)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -220,6 +221,10 @@
 (defun demo-patch (&key (ax (gca)))
   (add-rectangle 2.0 2.5 0.5 0.5 :color "b" :ax ax)  
   (draw-axis ax))
+
+(defun mpl/subplot (subplot)
+  "subplot can be '(2 2 1), or 221, or '(2 2 (1 2))"
+  (add-subplot *current-figure* subplot))
 
 (defun add-subplot (figure &optional (subplot-id 111) (projection "rectilinear"))
   "Returns an `AXIS' object"
