@@ -40,7 +40,8 @@
    #:mpl/add-colorbar
    #:mpl/set-figure-active
    #:cla/mpl
-   #:mpl/subplot)
+   #:mpl/subplot
+   #:mpl/gcf)
   (:documentation "
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -356,11 +357,11 @@
   (py4cl2:export-function (lambda (x) (/ (exp (- (* x x)))
                                          (sqrt pi))) "lisp_gaussian"))
 
-(defun gcf (&optional (window-title "default-figure"))
+(defun mpl/gcf (&optional (window-title "default-figure"))
   "If title-provided, then will create a figure if one does not
  currently exist."
   (or *current-figure*
-      (new-figure :window-title window-title)))
+      (setf *current-figure* (new-figure :window-title window-title))))
 
 (defun gca (&optional (window-title-if-new "Default figure title"))
   "Return last used axis.  If no figure exists, create a new one and a new axis"
@@ -393,7 +394,7 @@
 
 (defun get-figure! (&optional (figure-title "Default figure title"))
   "May create a new figure.  Always returns a figure."
-  (gcf figure-title))
+  (mpl/gcf figure-title))
 
 (defun get-axis! (&optional (ax (gca)) (figure-title "Default figure title"))
   "May create a new figure.  Always returns an axis."
