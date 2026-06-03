@@ -193,10 +193,12 @@
                                (if (string= layout "docked") t nil))))
     (setf *current-figure* (register-new-figure figure-number window-title figure-handle layout))))
 
-(defun mpl/set-figure-active (figure-number)
-  (let ((figure (get-figure figure-number)))
-    (assert figure nil "Figure with name ~A does not exist" figure-number)
-    (setf *current-figure* figure)))
+(defun mpl/set-figure-active (figure/figure-number)
+  (if (typep figure/figure-number 'figure)
+      (setf *current-figure* figure/figure-number)
+      (let ((figure (get-figure figure/figure-number)))
+        (assert figure nil "Figure with name ~A does not exist" figure/figure-number)
+        (setf *current-figure* figure))))
 
 (defun set-window-style/matplotlib (style)
   ;; BUGS:
@@ -226,44 +228,68 @@
   "subplot can be '(2 2 1), or 221, or '(2 2 (1 2))"
   (add-subplot *current-figure* subplot))
 
-(defun add-subplot (figure &optional (subplot-id 111) (projection "rectilinear"))
-  "Returns an `AXIS' object"
-  ;; TODO check and see if a subplot already exists in the figure-axes?
-  (unless figure
-    (setf figure (new-figure)))
-  (let ((maybe-ax (find subplot-id (figure-axes figure) :key #'axis-subplot :test 'equal)))
-    (if maybe-ax
-        (setf (figure-current-axis figure) maybe-ax)
-        (let* ((ax (if (typep subplot-id 'sequence)
-                       (progn
-                         (assert (= (length subplot-id) 3))
-                         (pymethod (figure-handle figure) "add_subplot"
-                                   (elt subplot-id 0) (elt subplot-id 1) (elt subplot-id 2)
-                                   :projection projection))
-                       (pymethod (figure-handle figure) "add_subplot" subplot-id
-                                 :projection projection)))
-               (new-axis (make-axis :handle ax :figure figure :subplot subplot-id)))
-          (set-new-active-axis new-axis)
-          (draw-axis new-axis)
-          new-axis))))
+(defun parse-subplot-id (subplot-id)
+  (if (numberp subplot-id)
+      (let* ((hundreds (floor subplot-id 100))
+             (tens (progn (decf subplot-id (* 100 hundreds))
+                          (floor subplot-id 10)))
+             (ones (decf subplot-id (* 10 tens))))
+        (list hundreds tens ones))
+      subplot-id))
 
-(defun lots-of-patches (&optional (N 50000))
-  (let* ((fig (new-figure :window-title "Patch demo"))
-         (ax (add-subplot fig)))
-    (labels ((random-array (range)
-               (coerce (loop repeat N collect (random range))
-                       '(simple-array double-float (*)))))
-      (let ((xs (random-array 1d0))
-            (ys (random-array 1d0))
-            (ws (random-array 0.01d0))
-            (hs (random-array 0.01d0)))
-        (pycall "PyQt6_cl_matplotlib.draw_lots_of_patches" xs ys ws hs ax))
-    ;; (time
-    ;;  (dotimes (i N)
-    ;;    (add-rectangle (random 1d0) (random 1d0) (random 0.01d0) (random 0.01d0)
-    ;;                   :ax ax :color (elt '("r" "b" "g" "y" "c" "m" "k")
-    ;;                                      (random 7)))))
-    (draw-axis ax))))
+(defun matlab-gridspec-to-matplotlib-gridspec (nrows ncols matlab-spec fig_gridspec)
+  (let ((row-start nil)
+        (col-start nil)
+        (row-end nil)
+        (col-end))
+    (setf matlab-spec (map 'list (lambda (x) (- x 1)) matlab-spec)) ;; zero based
+    (setf col-start (apply #'min (map 'list (lambda (x) (mod x nrows)) matlab-spec)))
+    (setf col-end (apply #'max (map 'list (lambda (x) (mod x nrows)) matlab-spec)))
+    (setf row-start (apply #'min (map 'list (lambda (x) (floor x ncols)) matlab-spec)))
+    (setf row-end (apply #'max (map 'list (lambda (x) (floor x ncols)) matlab-spec)))
+    ;; array indexing is exclusive of the second bound in python, not so in matlab
+    (py4cl2:pyeval fig_gridspec (format nil "[~A:~A, ~A:~A]" row-start (1+ row-end) col-start (1+ col-end)))))
+
+(defun add-subplot (figure &optional (subplot-id 111) (projection "rectilinear"))
+  "Returns an `AXIS' object.  subplot-id can be a number, from 111 to 999.  For, example, 122
+ is equivalent to (subplot '(1 2 2)).  To specify, matlab style, a figure which spans many
+ subplots you do: (subplot '(2 2 (3 4))) which means in a 2x2 grid, create a plot which
+ spans the subplots designated by (subplot '(2 2 3)) and (subplot '(2 2 4)).  You can draw
+ arbitrary boxes for subplots that way within a grid like: (subplot '(4 4 '(6 7 9 10))) is
+ a large central subplot with potentially 12 small figures around it.  Counting is left to
+ right and then top to bottom starting at 1."
+  (declare (optimize (debug 3)))
+  (unless figure
+    (setf figure (new-figure))
+    (setf *current-figure* figure))
+  (setf subplot-id (parse-subplot-id subplot-id))
+  (destructuring-bind (nrows ncols grid-desc) subplot-id
+    (let ((ax (find subplot-id (figure-axes figure) :key #'axis-subplot :test 'equal)))
+      (if ax
+        (setf (figure-current-axis figure) ax)
+        (if (numberp (third subplot-id)) ;; simple (subplot '( 2 3 4))
+            (let* ((new-ax-handle (pymethod (figure-handle figure) "add_subplot"
+                                            (nth 0 subplot-id) (nth 1 subplot-id) (nth 2 subplot-id)
+                                            :projection projection))
+                   (ax (make-axis :handle new-ax-handle :figure figure :subplot subplot-id)))
+              (set-new-active-axis ax)
+              (draw-axis ax)
+              ax)
+            (let ((fig-gridspec
+                    (when (figure-current-axis figure)
+                      (pymethod (axis-handle (figure-current-axis figure)) "get_gridspec"))))
+              (when (or (not fig-gridspec)
+                        (and fig-gridspec (not (and (= (pyslot-value fig-gridspec "nrows") nrows)
+                                                    (= (pyslot-value fig-gridspec "ncols") ncols)))))
+                (setf fig-gridspec
+                      (pymethod (figure-handle figure) "add_gridspec" :nrows nrows :ncols ncols)))
+              (let* ((ax (pymethod (figure-handle figure) "add_subplot"
+                                   (matlab-gridspec-to-matplotlib-gridspec nrows ncols grid-desc fig-gridspec)
+                                   :projection projection))
+                     (new-axis (make-axis :handle ax :figure figure :subplot subplot-id)))
+                (set-new-active-axis new-axis)
+                (draw-axis new-axis)
+                new-axis)))))))
 
 (defparameter *counter* 0)
 
