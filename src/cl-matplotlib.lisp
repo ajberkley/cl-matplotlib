@@ -9,7 +9,7 @@
    #:ylabel
    #:title
    #:legend
-   #:grid
+   #:mpl/grid
    #:draw-axis
    #:zlabel
    #:tri-surf
@@ -428,9 +428,11 @@
   (pymethod (axis-handle ax) "legend" strings :loc loc)
   (when draw (draw-axis ax)))
 
-(defun grid (&key (visible t) (ax (gca)) (draw t))
+(defun mpl/grid (&key (switch :on) (which :major) (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod (axis-handle ax) "grid" :visible visible)
+  (py4cl2:pymethod (axis-handle ax) "grid"
+                   (if (member switch '(:on :minor)) t nil)
+                   :which (if (eq which :minor) "minor" "major"))
   (when draw (draw-axis ax)))
 
 (defun xlim (x0 x1 &key (ax (gca)) (draw t))
@@ -464,7 +466,6 @@
       (xlabel "position ($\\mu m$)" :ax ax)
       (ylabel "Resistance ($\\Omega$)" :ax ax)
       (title "My happy e$\\chi$periment" :ax ax)
-      (grid :visible t :ax ax)
       (legend '("My data series") :ax ax)
       (draw-axis ax)
       ax)))
