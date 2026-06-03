@@ -516,7 +516,7 @@
          (ax (figure-current-axis fig)))
     ;; TODO FIXME
     (when ax (pymethod ax "remove")) ;; in case it isn't 3D
-    (setf ax (add-subplot 111 :projection "3D"))
+    (setf ax (add-subplot fig 111 "3D"))
     (let ((colormap (pyeval "matplotlib.cm.coolwarm")))
       (pymethod ax "plot_trisurf" x y z :cmap colormap :axlim_clip t)
       (draw-axis ax))))
