@@ -45,9 +45,15 @@ class MplDockWidget(QDockWidget):
         self.figure.dockwidget = self
         self.canvas = FigureCanvas(self.figure)
         self.window_title = title
+        self.waiting_on_ginput = 0
+        self.ginputs = []
         def update_active_figure (event):
             if not self.closing:
-                set_active_figure(self.unique_figure_id, event.inaxes)
+                if (self.waiting_on_ginput > 0) and event.inaxes:
+                    self.ginputs.append([event.xdata, event.ydata])
+                    self.waiting_on_ginput = self.waiting_on_ginput - 1
+                else:
+                    set_active_figure(self.unique_figure_id, event.inaxes)
         self.canvas.mpl_connect('button_press_event', update_active_figure)
         self.toolbar = NavigationToolbar(self.canvas, self)
         layout.addWidget(self.toolbar)
@@ -57,7 +63,7 @@ class MplDockWidget(QDockWidget):
         self.setWidget(self.container)
         self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.canvas.mpl_connect('key_press_event', self.on_key_press)
-        self.figure.set_tight_layout(True)
+        self.figure.set_layout_engine(matplotlib.layout_engine.ConstrainedLayoutEngine())
         #self.canvas.setFocus()
         
     def on_key_press(self, event):
@@ -65,14 +71,10 @@ class MplDockWidget(QDockWidget):
         if event.key == 'ctrl+w':
             self.close_window()
         key_press_handler(event, self.canvas, self.toolbar)
-        
+
     def mousePressEvent(self, event: QMouseEvent):
-        # This handles mouse click events outside the active matplotlib
-        # areas.
         if not self.closing:
             if event.button() == Qt.MouseButton.LeftButton:
-                #local_pos = event.position()
-                # Do better hear, search for which axis!
                 axes = self.figure.get_axes()
                 if len(axes) > 0:
                     set_active_figure(self.unique_figure_id, self.figure.get_axes()[0])
@@ -80,6 +82,12 @@ class MplDockWidget(QDockWidget):
                     set_active_figure(self.unique_figure_id, None)
 
         super().mousePressEvent(event)
+
+    def get_ginputs (self):
+        results = self.ginputs;
+        print(f"results is {results}")
+        self.ginputs = [];
+        return results
         
     def clean_up_details (self):
         self.closing = True
