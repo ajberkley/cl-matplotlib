@@ -85,8 +85,28 @@
    #:mpl/set-linearscale
    #:mpl/set-axis-props
    #:mpl/set-error-bar-props
-   #:mpl/set-axis-tick-location)
-  (:documentation "
+   #:mpl/set-axis-tick-location
+   #:mpl/figure
+   #:mpl/apply-colormap
+   #:mpl/caxis
+   #:mpl/plot-image
+   #:mpl/axis-square
+   #:mpl/axis-equal
+   #:mpl/plot-bar
+   #:mpl/suptitle)
+  (:documentation "Wrapper around much of matplotlib functionality focusing on its
+ use in interactive plotting and data exploration.  The focus is on drawing and
+ modifying a plot so follows the 'matlab' style where one has an 'active figure' and
+ an 'active axes' where one plots data to or modifies the styles of.  Thus, while
+ every function in this package takes an axis object, it defaults to (gca) which gets
+ the current axis (or creates one).
+
+ Figures are made active by: (set-figure-active (get-figure identifier)) or
+ created by (new-figure).  They are deleted by (close-figure figure).  Every figure
+ keeps a list of axes in (figure-axes figure), and the current axes is
+ (figure-current-axis figure).
+
+ 
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
 
@@ -125,21 +145,21 @@
 (defvar *suppress-redraw* nil
   "When T draw-axis and draw-figure will do nothing")
 
+(defstruct figure
+  (handle nil) ;; a python handle to the matplotlib figure object
+  (dockwidget nil) ;; a python handle to the matplotlib dockwidget object
+  (axes nil :type list) ;; a list of axes
+  (current-axis nil) ;; current axis of the figure (nil or an `axis')
+  (layout-info nil) ;; for automatic tiled layout and stuff
+  (window-title "" :type string)
+  (tiled-layout-request '(1 1)) ;; '(2 2) for example, or :flow
+  (number (- (expt 2 32) 1) :type (unsigned-byte 32))) ;; unique session identifier
+
 (defstruct axis
   (handle nil) ;; a python handle
   (figure (make-figure) :type figure)
   (subplot nil)
   (colorbar nil)) ;; a python handle, is hard to find otherwise
-
-(defstruct figure
-  (handle nil) ;; a python handle to the matplotlib figure object
-  (dockwidget nil) ;; a python handle to the matplotlib dockwidget object
-  (axes nil :type list) ;; a list of axes
-  (current-axis nil :type (or null axis)) ;; current axis of the figure
-  (layout-info nil) ;; for automatic tiled layout and stuff
-  (window-title "" :type string)
-  (tiled-layout-request '(1 1)) ;; '(2 2) for example, or :flow
-  (number (- (expt 2 32) 1) :type (unsigned-byte 32))) ;; unique session identifier
 
 (defmethod print-object ((obj axis) stream)
   (print-unreadable-object (obj stream)
@@ -157,15 +177,15 @@
  identifier to a python figure object.  Careful to keep this up-to-date to not
  leak memory on the lisp (and python) side.")
 
-(defun draw-axis (ax)
-  (unless *suppress-redraw*
-    (draw-figure (axis-figure ax))))
-
 (defun draw-figure (fig)
   (unless *suppress-redraw*
     (let ((canvas (pyslot-value (figure-handle fig) "canvas")))
       (pymethod canvas "draw_idle")
       (values))))
+
+(defun draw-axis (ax)
+  (unless *suppress-redraw*
+    (draw-figure (axis-figure ax))))
 
 (defun clear-figure-tracking ()
   (setf *current-figure* nil)
@@ -182,6 +202,119 @@
   *active-figures*)
   nil)
 
+(defun find-figure (name &optional (fuzzy t))
+  (if fuzzy
+      (let ((found nil)
+            (found-value 0.8))
+        ;; warning the mk-string-metrics library will quietly
+        ;; return bogus values if you pass it anything except
+        ;; simple-array character
+        (maphash (lambda (k v)
+                   (declare (ignore k))
+                   (let ((closeness
+                           (mk-string-metrics:jaro-winkler
+                            (coerce (figure-window-title v) '(simple-array character (*)))
+                            (coerce name '(simple-array character (*))))))
+                     (when (> closeness found-value)
+                       (setf found v)
+                       (setf found-value closeness))))
+                 *active-figures*)
+        found)
+      (when (stringp name) (find-figure-with-window-title name))))
+
+(defun mpl/set-figure-active (figure/figure-number)
+  (if (typep figure/figure-number 'figure)
+      (setf *current-figure* figure/figure-number)
+      (let ((figure (get-figure figure/figure-number)))
+        (assert figure nil "Figure with name ~A does not exist" figure/figure-number)
+        (setf *current-figure* figure))))
+
+(defun raise-figure (figure &optional (delay nil))
+  "If the figure is new, we want to delay to give the gui loop a
+ chance to show() it first so it can raise it"
+  (let ((dockwidget (figure-dockwidget figure)))
+    (if delay
+        (pycall "PyQt6_cl_matplotlib.PyQt6.QtCore.QTimer.singleShot"
+                50
+                (lambda () (pymethod dockwidget "raise_")))
+        (pymethod dockwidget "raise_"))))
+
+(defvar *window-titles* '("eagle" "cow" "horse" "dog" "cat"))
+
+(defun make-random-window-title ()
+  (format nil "~a-~a"
+          (elt *window-titles* (random (length *window-titles*)))
+          (random 10)))
+
+(defun get-unused-window-title ()
+  (loop
+    for retries below 100
+    for window-title = (make-random-window-title)
+    until (not (cl-matplotlib:find-figure-with-window-title window-title))
+    finally (return (or window-title "ran out of title names"))))
+
+(defvar *figure-counter* (list 0))
+
+(defun get-unique-figure-number ()
+  (sb-ext:atomic-incf (car *figure-counter*)))
+
+(defun register-new-figure (figure-number window-title figure-handle
+                            &optional layout tiled-layout-request current-axis)
+  (assert (not (get-figure figure-number)) nil
+          "Creating a new figure with same ID as existing figure")
+  (let ((fig (make-figure :handle figure-handle :axes nil :current-axis current-axis
+                          :layout-info layout :window-title window-title :number figure-number
+                          :tiled-layout-request (or tiled-layout-request '(1 1))
+                          :dockwidget (pyslot-value figure-handle "dockwidget"))))
+    (setf (gethash figure-number *active-figures*) fig)
+    fig))
+
+(defun new-figure (&key window-title
+                     figure-number (layout "tabbed")
+                     (tiled-layout-request '(1 1)))
+  ;; layout can be "floating" "docked" "tabbed"
+  (assert (member layout '("floating" "docked" "tabbed") :test 'string=))
+  (when figure-number
+    (assert (not (get-figure figure-number)) nil
+            "Figure with number ~A already exists" figure-number))
+  (unless window-title
+    (setf window-title (or figure-number (get-unused-window-title))))
+  (unless figure-number (setf figure-number (get-unique-figure-number)))
+  (let ((figure-handle
+          (pycall "PyQt6_cl_matplotlib.NewFigure" window-title figure-number
+                  :docked (if (or (string= layout "docked")
+                                  (string= layout "tabbed"))
+                              t
+                              nil)
+                  :tabbed (if (equalp layout "tabbed")
+                              t
+                              nil))))
+    (setf *current-figure* (register-new-figure figure-number window-title figure-handle layout
+                                                tiled-layout-request))))
+
+(defun mpl/figure (identifier &optional (fuzzy-match nil))
+  "identifier is either the window title or the identifier used in a previous
+ call to figure.  Sets the *current-figure* to the new or found figure.  If
+ you are identifying a figure by the window name, you can use fuzzy-match t to
+ try avoid having to type the full name."
+    (labels ((new-fig (name/number)
+             (new-figure
+              :window-title (if (stringp name/number)
+                                name/number
+                                (get-unused-window-title))
+              :figure-number (if (numberp name/number)
+                                 name/number
+                                 (get-unique-figure-number)))))
+    (if identifier
+        (let ((figure (or (get-figure identifier)
+                          (find-figure identifier fuzzy-match)
+                          (new-fig identifier))))
+          (mpl/set-figure-active figure)
+          (raise-figure figure nil))
+        (progn (mpl/set-figure-active (new-fig nil))
+               (raise-figure *current-figure* t)))
+    *current-figure*))
+
 (defun delete-figure& (figure-number)
   "Does not close the window, that should be done by calling close-window&
  which may trigger a callback to this.  May be called with -1 if we are
@@ -197,6 +330,15 @@
 
 (defun set-figure-unique-id (figure new-unique-id)
   (setf (pyslot-value (figure-dockwidget figure) "unique_figure_id") new-unique-id))
+
+(defun set-window-title (figure window-title)
+  (pymethod (figure-dockwidget figure) "setWindowTitle" window-title)
+  (setf (figure-window-title figure) window-title))
+
+(defun close-figure (figure)
+  (declare (type figure figure))
+  ;; The below will trigger a callback to delete-figure&
+  (pymethod (figure-dockwidget figure) "close_window"))
 
 (defun renumber-figure (figure-num &optional new-window-title)
   (let ((fig *current-figure*))
@@ -221,21 +363,6 @@
     (when new-window-title
       (set-window-title fig new-window-title))
     figure-num))
-
-(defun set-window-title (figure window-title)
-  (pymethod (figure-dockwidget figure) "setWindowTitle" window-title)
-  (setf (figure-window-title figure) window-title))
-
-(defun register-new-figure (figure-number window-title figure-handle
-                            &optional layout tiled-layout-request current-axis)
-  (assert (not (get-figure figure-number)) nil
-          "Creating a new figure with same ID as existing figure")
-  (let ((fig (make-figure :handle figure-handle :axes nil :current-axis current-axis
-                          :layout-info layout :window-title window-title :number figure-number
-                          :tiled-layout-request (or tiled-layout-request '(1 1))
-                          :dockwidget (pyslot-value figure-handle "dockwidget"))))
-    (setf (gethash figure-number *active-figures*) fig)
-    fig))
 
 (defun register-new-axis (figure new-axis)
   (push new-axis (figure-axes figure)))
@@ -264,55 +391,6 @@
     (pushnew ax (figure-axes fig))
     (setf (figure-current-axis fig) ax)))
 
-(defvar *figure-counter* (list 0))
-
-(defun get-unique-figure-number ()
-  (sb-ext:atomic-incf (car *figure-counter*)))
-
-(defvar *window-titles* '("eagle" "cow" "horse" "dog" "cat"))
-
-(defun make-random-window-title ()
-  (format nil "~a-~a"
-          (elt *window-titles* (random (length *window-titles*)))
-          (random 10)))
-
-(defun get-unused-window-title ()
-  (loop
-    for retries below 100
-    for window-title = (make-random-window-title)
-    until (not (cl-matplotlib:find-figure-with-window-title window-title))
-    finally (return (or window-title "ran out of title names"))))
-
-(defun new-figure (&key window-title
-                     figure-number (layout "tabbed")
-                     (tiled-layout-request '(1 1)))
-  ;; layout can be "floating" "docked" "tabbed"
-  (assert (member layout '("floating" "docked" "tabbed") :test 'string=))
-  (when figure-number
-    (assert (not (get-figure figure-number)) nil
-            "Figure with number ~A already exists" figure-number))
-  (unless window-title
-    (setf window-title (or figure-number (get-unused-window-title))))
-  (unless figure-number (setf figure-number (get-unique-figure-number)))
-  (let ((figure-handle
-          (pycall "PyQt6_cl_matplotlib.NewFigure" window-title figure-number
-                  :docked (if (or (string= layout "docked")
-                                  (string= layout "tabbed"))
-                              t
-                              nil)
-                  :tabbed (if (equalp layout "tabbed")
-                              t
-                              nil))))
-    (setf *current-figure* (register-new-figure figure-number window-title figure-handle layout
-                                                tiled-layout-request))))
-
-(defun mpl/set-figure-active (figure/figure-number)
-  (if (typep figure/figure-number 'figure)
-      (setf *current-figure* figure/figure-number)
-      (let ((figure (get-figure figure/figure-number)))
-        (assert figure nil "Figure with name ~A does not exist" figure/figure-number)
-        (setf *current-figure* figure))))
-
 (defun set-window-style/matplotlib (style)
   (assert (member style '("tabbed" "docked" "floating") :test 'string=))
   (let ((figure *current-figure*))
@@ -323,24 +401,6 @@
          ((string= style "floating") "PyQt6_cl_matplotlib.FloatFigure")
          (t "PyQt6_cl_matplotlib.DockFigure"))
        (figure-handle figure)))))
-
-(defun close-figure (figure)
-  (declare (type figure figure))
-  ;; The below will trigger a callback to delete-figure&
-  (pymethod (figure-dockwidget figure) "close_window"))
-
-(defun add-rectangle (x y w h &key (ax (gca)) (color "r"))
-  (assert ax nil "No current axis")
-  (let ((rec (pycall "matplotlib.patches.Rectangle" (list x y) w h :color color)))
-    (pymethod ax "add_patch" rec)))
-
-(defun demo-patch (&key (ax (gca)))
-  (add-rectangle 2.0 2.5 0.5 0.5 :color "b" :ax ax)  
-  (draw-axis ax))
-
-(defun mpl/subplot (subplot)
-  "subplot can be '(2 2 1), or 221, or '(2 2 (1 2))"
-  (add-subplot *current-figure* subplot))
 
 (defun parse-subplot-id (subplot-id)
   (if (numberp subplot-id)
@@ -414,6 +474,10 @@
                 (draw-axis new-axis)
                 new-axis)))))))
 
+(defun mpl/subplot (subplot)
+  "subplot can be '(2 2 1), or 221, or '(2 2 (1 2))"
+  (add-subplot *current-figure* subplot))
+
 (defun delete-axis (ax &optional (figure *current-figure*))
   (when figure
     (setf (figure-axes figure) (remove ax (figure-axes figure)))
@@ -442,16 +506,6 @@
                                       (draw ax event)))
       ;; store button to prevent it from getting gc'ed
       (setf (pyslot-value (figure-handle fig) "button") button))))
-
-(defun demo (&optional (start-loop t))
-  "This code uses Common Lisp for interactivity"
-  (clear-figure-tracking)
-  (when start-loop (when (py4cl2:python-alive-p)
-                     (pystop)) (start-loop))
-  (show-callback-demo)
-  (surf-random-data)
-  (new-figure :window-title "Errorbar demo")
-  (plot-random-points :ax nil))
 
 (defun start-loop ()
   "Call this to start the main gui loop"
@@ -508,7 +562,57 @@
     (when ax
       (pymethod (axis-handle ax) "cla")
       (draw-axis ax))))
-        
+
+(defun get-used-colors (axis)
+  "Returns a hash table of RGB triplets (lists) and counts of them"
+  (declare (type axis axis))
+  (pycall "PyQt6_cl_matplotlib.get_axis_used_colors" (axis-handle axis)))
+
+(defun maybe-matlab-color-to-rgb (color)
+  "color can be a matlab color, a string '#1f77b4' or a list of numbers from 0.0 to 1.0, an rgb triplet"
+  (when (not (stringp color))
+    (return-from maybe-matlab-color-to-rgb color))
+  (when (eql (aref color 0) #\#)
+    (return-from maybe-matlab-color-to-rgb
+      (loop for entry below 3
+            collect (/ (parse-integer color :radix 16 :start (+ 1 (* 2 entry)) :end (+ 3 (* 2 entry)))
+                       255.0))))
+  (macrolet ((is (&rest colors)
+               `(member color ',colors :test 'equalp)))
+    (cond
+      ((is "r" "red") '(1.0 0.0 0.0))
+      ((is "g" "green") '(0.0 1.0 0.0))
+      ((is "b" "blue") '(0.0 0.0 1.0))
+      ((is "c" "cyan") '(0.0 1.0 1.0))
+      ((is "m" "magenta") '(1.0 0.0 1.0))
+      ((is "y" "yellow") '(1.0 1.0 0.0))
+      ((is "k" "black") '(0.0 0.0 0.0))
+      ((is "w" "white") '(1.0 1.0 1.0))
+      (t (error "Unknown color ~A" color)))))
+
+(defvar *color-set* #((0.0 0.0 1.0) (1.0 0.0 0.0) (0.0 1.0 0.0) (0.0 0.0 0.0) (1.0 0.0 1.0) (0.0 1.0 1.0) (1.0 1.0 0.0)))
+
+(defun find-next-color (axis)
+  "Only works if user sticks with the primary colors in *color-set*."
+  (let ((used-colors (make-hash-table :test 'equal)))
+    (map nil (lambda (c) (setf (gethash c used-colors) 0)) *color-set*)
+    (maphash (lambda (c count) (incf
+                                    (gethash (maybe-matlab-color-to-rgb c) used-colors 0)
+                                    count))
+         (get-used-colors axis))
+    (let ((best-color nil)
+          (minimum-used most-positive-fixnum))
+      (maphash (lambda (color count)
+                 (when (< count minimum-used)
+                   (setf minimum-used count)
+                   (setf best-color color)))
+               used-colors)
+      best-color)))
+
+(defun get-axis! (&optional (ax (gca)) figure-title)
+  "May create a new figure.  Always returns an axis."
+  (or ax (gca figure-title)))
+
 (defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") ax (label "") markerfacecolor
                                         markeredgecolor hide-in-legend)
   (unless *loop-started* (start-loop))
@@ -531,10 +635,6 @@
 (defun get-figure! (&optional figure-title)
   "May create a new figure.  Always returns a figure."
   (mpl/gcf figure-title))
-
-(defun get-axis! (&optional (ax (gca)) figure-title)
-  "May create a new figure.  Always returns an axis."
-  (or ax (gca figure-title)))
 
 (defun plot-xy-data (x y &key linestyle color (marker "o") ax label hide-in-legend)
   (unless *loop-started* (start-loop))
@@ -639,26 +739,6 @@
   (pymethod (axis-handle ax) "set_zlim" z0 z1)
   (when draw (draw-axis ax)))
 
-(defun plot-random-points (&key (N 10) (marker ".") (linestyle "-") (color "k") (errorbars t) (ax (gca)))
-  (labels ((rand (&optional (scale 10d0))
-             (loop repeat N collect (- (random scale) (/ scale 2d0))))
-           (prand (&optional (scale 1d0))
-             (loop repeat N collect (random scale))))
-    (let ((ax
-            (if errorbars
-                (plot-errorbar (rand) (prand) (prand)
-                               (rand) (prand) (prand)
-                               :marker marker :linestyle linestyle :color color
-                               :ax ax)
-                (plot-xy-data (rand) (rand) :marker marker :linestyle linestyle
-                                            :color color :ax ax))))
-      (mpl/xlabel "position ($\\mu m$)" :ax ax)
-      (mpl/ylabel "Resistance ($\\Omega$)" :ax ax)
-      (mpl/title "My happy e$\\chi$periment" :ax ax)
-      (mpl/legend :legend-entries '("My data series") :ax ax)
-      (draw-axis ax)
-      ax)))
-
 (defun sampled-colormap-to-cmap (sampled-colormap)
   (assert (typep sampled-colormap 'array))
   (py4cl2:pycall "matplotlib.colors.ListedColormap" sampled-colormap))
@@ -730,65 +810,6 @@
       (pymethod (figure-handle fig) "set_size_inches" old-size)
       full-filename)))
 
-;; (defun get-used-colors (axis)
-;;   (declare (type axis axis))
-;;   (let ((children (pymethod (axis-handle axis) "get_children"))
-;;         (colors))
-;;     (map nil (lambda (child)
-;;                (when (pycall "isinstance" child '|matplotlib.lines.Line2D|)
-;;                  (push (pymethod child "get_color") colors)
-;;                  (push (pymethod child "get_markeredgecolor") colors)
-;;                  (push (pymethod child "get_markerfacecolor") colors)))
-;;          children)
-;;     colors))
-;; Above is too slow when you are plotting a lot of lines
-
-(defun get-used-colors (axis)
-  "Returns a hash table of RGB triplets (lists) and counts of them"
-  (declare (type axis axis))
-  (pycall "PyQt6_cl_matplotlib.get_axis_used_colors" (axis-handle axis)))
-
-(defun maybe-matlab-color-to-rgb (color)
-  "color can be a matlab color, a string '#1f77b4' or a list of numbers from 0.0 to 1.0, an rgb triplet"
-  (when (not (stringp color))
-    (return-from maybe-matlab-color-to-rgb color))
-  (when (eql (aref color 0) #\#)
-    (return-from maybe-matlab-color-to-rgb
-      (loop for entry below 3
-            collect (/ (parse-integer color :radix 16 :start (+ 1 (* 2 entry)) :end (+ 3 (* 2 entry)))
-                       255.0))))
-  (macrolet ((is (&rest colors)
-               `(member color ',colors :test 'equalp)))
-    (cond
-      ((is "r" "red") '(1.0 0.0 0.0))
-      ((is "g" "green") '(0.0 1.0 0.0))
-      ((is "b" "blue") '(0.0 0.0 1.0))
-      ((is "c" "cyan") '(0.0 1.0 1.0))
-      ((is "m" "magenta") '(1.0 0.0 1.0))
-      ((is "y" "yellow") '(1.0 1.0 0.0))
-      ((is "k" "black") '(0.0 0.0 0.0))
-      ((is "w" "white") '(1.0 1.0 1.0))
-      (t (error "Unknown color ~A" color)))))
-
-(defvar *color-set* #((0.0 0.0 1.0) (1.0 0.0 0.0) (0.0 1.0 0.0) (0.0 0.0 0.0) (1.0 0.0 1.0) (0.0 1.0 1.0) (1.0 1.0 0.0)))
-
-(defun find-next-color (axis)
-  "Only works if user sticks with the primary colors in *color-set*."
-  (let ((used-colors (make-hash-table :test 'equal)))
-    (map nil (lambda (c) (setf (gethash c used-colors) 0)) *color-set*)
-    (maphash (lambda (c count) (incf
-                                    (gethash (maybe-matlab-color-to-rgb c) used-colors 0)
-                                    count))
-         (get-used-colors axis))
-    (let ((best-color nil)
-          (minimum-used most-positive-fixnum))
-      (maphash (lambda (color count)
-                 (when (< count minimum-used)
-                   (setf minimum-used count)
-                   (setf best-color color)))
-               used-colors)
-      best-color)))
-
 (defun clear-figure (&optional (figure *current-figure*))
   (declare (type (or null figure) figure))
   (when figure
@@ -797,12 +818,34 @@
     (setf (figure-axes figure) nil)
     (draw-figure figure)))
 
+(defun mpl/find-scalar-mappable (&optional (fig *current-figure*))
+  (map nil (lambda (axes)
+             (map nil (lambda (child)
+                        (when (pycall "isinstance" child '|matplotlib.cm.ScalarMappable|)
+                          (return-from mpl/find-scalar-mappable child)))
+                  (pymethod axes "get_children")))
+       (pymethod (figure-handle fig) "get_axes")))
+
+(defun mpl/apply-colormap (cmap &key min/max (clip t))
+  "Apply a new colormap to an existing colormap image.  min/max and clip determine
+ how the colormap is applied."
+  (let* ((ax (gca))
+         (scalable (mpl/find-scalar-mappable)))
+    (when min/max
+      (py4cl2:pymethod scalable "set_norm"
+                       (py4cl2:pycall "matplotlib.colors.Normalize"
+                                      :vmin (first min/max) :vmax (second min/max)
+                                      :clip clip)))
+    (py4cl2:pymethod scalable "set_cmap"
+                     (cl-matplotlib:sampled-colormap-to-cmap cmap))
+    (draw-axis ax)))
+
 (defun mpl/add-colorbar (colormap-min colormap-max
                      &key (figure *current-figure*) (axis (figure-current-axis figure))
-                       (cmap "viridis") (clip t) ticks ticklabels label interpreter)
-  "Do this is you have not created your axis/plot with the :cmap key, that is
- draw a fake colormap not connected to your data (if, for example, you did coloring
- by hand).  Since this is a fake colormap CLIP is not important."
+                       (cmap "viridis") (clip t) ticks ticklabels label interpreter
+                       apply)
+  "This will add a colorbar image to the plot.  IF you want to also apply the colormap
+ to the figure (replacing any one that was used during the plot call) then specify :apply t."
   (declare (ignorable interpreter))
   (when ticklabels (assert (= (length ticks) (length ticklabels))))
   ;; Need to delete an old colorbar if it is there
@@ -826,6 +869,8 @@
           (setf (axis-colorbar axis) colorbar)
           (when (or ticks ticklabels)
             (py4cl2:pymethod colorbar "set_ticks" ticks :labels (or ticklabels ticks))))
+      (when apply
+        (mpl/apply-colormap cmap :min/max (list colormap-min colormap-max) :clip clip))
       (draw-axis axis))))
 
 (defun mpl/get-colormap (name)
@@ -929,14 +974,6 @@
 (defun mpl/set-axes-background-color (color &key (ax (gca)))
   (pymethod (axis-handle ax) "set_facecolor" color))
 
-(defun mpl/find-scalar-mappable (&optional (fig *current-figure*))
-  (map nil (lambda (axes)
-             (map nil (lambda (child)
-                        (when (pycall "isinstance" child '|matplotlib.cm.ScalarMappable|)
-                          (return-from mpl/find-scalar-mappable child)))
-                  (pymethod axes "get_children")))
-       (pymethod (figure-handle fig) "get_axes")))
-
 (defun mpl/draw-text (x y text
                       &key horizontal-alignment (fontsize 8) (color "k") vertical-alignment
                         interpreter rotation background-color normalized-x normalized-y
@@ -982,17 +1019,6 @@
                t)
         nil)))
 
-(defun mpl/set-legend-string-on-last-data-series (legend-string &key (show-legend t))
-  (let* ((ax (gca))
-         (children (pymethod (axis-handle ax) "get_children")))
-    (loop for child across (reverse children)
-          for is-line = (pycall "isinstance" child '|matplotlib.lines.Line2D|)
-          until is-line
-          finally
-             (assert is-line nil "Could not find data series to label")
-             (pymethod child "set_label" legend-string))
-    (when show-legend (mpl/legend))))
-
 (defun mpl/legend (&key (ax (gca)) title location fontsize facecolor (framealpha 1.0)
                           legend-entries (ncol 1) labelcolor bbox-to-anchor
                      fontweight)
@@ -1011,6 +1037,17 @@
                      (when bbox-to-anchor (list :bbox_to_anchor bbox-to-anchor))))))
     (pymethod leg "set_draggable" t))
   (draw-axis ax))
+
+(defun mpl/set-legend-string-on-last-data-series (legend-string &key (show-legend t))
+  (let* ((ax (gca))
+         (children (pymethod (axis-handle ax) "get_children")))
+    (loop for child across (reverse children)
+          for is-line = (pycall "isinstance" child '|matplotlib.lines.Line2D|)
+          until is-line
+          finally
+             (assert is-line nil "Could not find data series to label")
+             (pymethod child "set_label" legend-string))
+    (when show-legend (mpl/legend))))
 
 (defun mpl/set-legend-title (title &key (ax (gca)) fontsize fontweight)
   (let ((l (py4cl2:pymethod (axis-handle ax) "get_legend")))
@@ -1149,16 +1186,6 @@
                  (incf count))
       (pymethod (figure-handle figure) "subplots_adjust")
     (draw-figure figure))))
-
-(defun raise-figure (figure &optional (delay nil))
-  "If the figure is new, we want to delay to give the gui loop a
- chance to show() it first so it can raise it"
-  (let ((dockwidget (figure-dockwidget figure)))
-    (if delay
-        (pycall "PyQt6_cl_matplotlib.PyQt6.QtCore.QTimer.singleShot"
-                50
-                (lambda () (pymethod dockwidget "raise_")))
-        (pymethod dockwidget "raise_"))))
 
 (defun mpl/plot-universal-time-series (data &key color marker linewidth linestyle displayname)
   "data is a list of universal-time (seconds) and numbers."
@@ -1355,3 +1382,121 @@
                         (pycall "list" errorbars)))))
          containers)
     (draw-axis ax)))
+
+(defun mpl/plot-image (image-data &key (x0 0) (dx 1) (y0 0) (dy 1)
+                              colormap xdim ydim use-alpha alpha-stencil
+                                    colorbar-label colorbar-min colorbar-max clip)
+    (declare (optimize (debug 3)) (ignore colorbar-label))
+  "Make color image plot for 2-dimensional image-plot. IMAGE-DATA
+ should be a 2-d array.  By default, pixel locations are labelled 0
+ through N-1 (where N is the length in each dimension).  X0/DX and
+ Y0/DY can be provided to modify the X and Y labelling.  Returns figure
+ ID and colorbar ID as multiple values.  If you want to exclude points from
+ image-data, put in NaNs"
+  (assert (= (array-rank image-data) 2))
+  (let* ((dimensions (if (and xdim ydim) (list ydim xdim) (array-dimensions image-data)))
+         (x-range (list x0 (+ x0 (* (1- (second dimensions)) dx))))
+         (y-range (list y0 (+ y0 (* (1- (first dimensions)) dy))))
+         (min sb-ext:double-float-positive-infinity)
+         (max sb-ext:double-float-negative-infinity))
+    (loop for i below (array-dimension image-data 0)
+          do (loop for j below (array-dimension image-data 1)
+                   for d = (aref image-data i j)
+                   when (> d max)
+                     do (setf max d)
+                   when (< d min)
+                     do (setf min d)))
+    (let* ((ax (gca))
+           (axh (cl-matplotlib::axis-handle ax))
+           (cmap (sampled-colormap-to-cmap colormap)))
+      ;; should create the clipped colorbar mapping here...
+      (py4cl2:pymethod axh "imshow" image-data
+                       :cmap cmap :alpha (or (and use-alpha alpha-stencil) "None")
+                       :extent (append x-range y-range)
+                       :aspect "auto" :origin "lower") ;; flip so matches matlab
+      (let ((real-min (or colorbar-min min))
+            (real-max (or colorbar-max max)))
+        (mpl/add-colorbar real-min real-max :cmap colormap :clip clip))
+      (draw-axis ax))))
+
+(defun mpl/caxis (min max &key (clip t) (ax (gca)))
+  "Change the already applied colormap to apply to values between min and max instead of
+ what it was originally created with)"
+    (let* ((scalable (mpl/find-scalar-mappable)))
+      (py4cl2:pymethod scalable "set_norm"
+                       (py4cl2:pycall "matplotlib.colors.Normalize"
+                                      :vmin min :vmax max :clip clip))
+      (draw-axis ax)))
+
+(defun mpl/axis-square (&key (ax (gca)))
+  (py4cl2:pymethod (axis-handle ax) "set_box_aspect" 1)
+  (draw-axis ax))
+
+(defun mpl/axis-equal (&key (ax (gca)))
+  (py4cl2:pymethod (axis-handle ax) "set_aspect" "equal")
+  (draw-axis ax))
+
+(defun mpl/plot-bar (data &key facecolor (barwidth 0.9) displayname facealpha edgecolor)
+  "barwidth is normalized so that 1.0 means the closest two bars do not overlap."
+  (let* ((xvals (remove-duplicates (sort (map 'list #'first data) #'<)))
+         (min-spacing nil))
+    (loop for a in xvals
+          for b in (cdr xvals)
+          do (when (or (not min-spacing) (< (- b a) min-spacing))
+               (setf min-spacing (- b a))))
+    (let ((ax (gca)))
+      (apply 'py4cl2:pymethod (axis-handle ax)
+             "bar"
+             (map 'list #'first data) ;; can be anythings
+             (map '(simple-array double-float (*))
+                  (lambda (x) (coerce (second x) 'double-float))
+                  data)
+             :width (if barwidth
+                        (* barwidth min-spacing 1.0)
+                        (* 0.9d0 (/ (- (car (last xvals)) (first xvals)) (length data))))
+             (append
+              (when edgecolor (list :edgecolor edgecolor))
+              (when facecolor (list :color facecolor))
+              (when facealpha (list :alpha facealpha))
+              (when displayname (list :label displayname))))
+      (draw-axis ax))))
+
+(defun mpl/suptitle (suptitle &key fontsize)
+  "Add a title to the top of a bunch of subplots"
+    (let ((fig (mpl/gcf)))
+    (py4cl2:pymethod (figure-handle fig) "suptitle" suptitle :fontsize fontsize)
+    (draw-figure fig)))
+
+(defun plot-random-points (&key (N 10) (marker ".") (linestyle "-") (color "k") (errorbars t) (ax (gca)))
+  (labels ((rand (&optional (scale 10d0))
+             (loop repeat N collect (- (random scale) (/ scale 2d0))))
+           (prand (&optional (scale 1d0))
+             (loop repeat N collect (random scale))))
+    (let ((ax
+            (if errorbars
+                (plot-errorbar (rand) (prand) (prand)
+                               (rand) (prand) (prand)
+                               :marker marker :linestyle linestyle :color color
+                               :ax ax)
+                (plot-xy-data (rand) (rand) :marker marker :linestyle linestyle
+                                            :color color :ax ax))))
+      (mpl/xlabel "position ($\\mu m$)" :ax ax)
+      (mpl/ylabel "Resistance ($\\Omega$)" :ax ax)
+      (mpl/title "My happy e$\\chi$periment" :ax ax)
+      (mpl/legend :legend-entries '("My data series") :ax ax)
+      (draw-axis ax)
+      ax)))
+
+(defun add-rectangle (x y w h &key (ax (gca)) (color "r"))
+  (assert ax nil "No current axis")
+  (let ((rec (pycall "matplotlib.patches.Rectangle" (list x y) w h :color color)))
+    (pymethod ax "add_patch" rec)))
+
+(defun demo (&optional (start-loop t))
+  (clear-figure-tracking)
+  (when start-loop (when (py4cl2:python-alive-p)
+                     (pystop)) (start-loop))
+  (show-callback-demo)
+  (surf-random-data)
+  (new-figure :window-title "Errorbar demo")
+  (plot-random-points :ax nil))
