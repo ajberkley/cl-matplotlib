@@ -93,7 +93,8 @@
    #:mpl/axis-square
    #:mpl/axis-equal
    #:mpl/plot-bar
-   #:mpl/suptitle)
+   #:mpl/suptitle
+   #:mpl/scatter)
   (:documentation "Wrapper around much of matplotlib functionality focusing on its
  use in interactive plotting and data exploration.  The focus is on drawing and
  modifying a plot so follows the 'matlab' style where one has an 'active figure' and
@@ -101,11 +102,10 @@
  every function in this package takes an axis object, it defaults to (gca) which gets
  the current axis (or creates one).
 
- Figures are made active by: (set-figure-active (get-figure identifier)) or
- created by (new-figure).  They are deleted by (close-figure figure).  Every figure
- keeps a list of axes in (figure-axes figure), and the current axes is
+ Figures are made active or created by: (mpl/figure figure-identifier).  They are deleted
+ by (close-figure figure).  Every figure keeps a list of axes in (figure-axes figure), and the
+ current axes is
  (figure-current-axis figure).
-
  
  If you are using Ubuntu 22, you will need to sudo apt install libxcb-cursor0 and
  export QT_QPA_PLATFORM=xcb as wayland is broken with docking windows.
@@ -757,13 +757,29 @@
     (draw-axis ax)
     ax))
 
-(defun tri-surf (x y z &key cmap)
+(defun tri-surf (x y z &key cmap facealpha (edgecolor "None")
+                         mesh-only facecolor linewidth
+                         show-colorbar)
+  "When mesh-only, cmap should be "
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
-  (unless cmap
-    (setf cmap (pyeval "matplotlib.cm.coolwarm")))
-  (let* ((ax (ensure-3d-axis (gca))))
-    (pymethod (axis-handle ax) "plot_trisurf" x y z :cmap cmap :axlim_clip t)
+  (let* ((ax (ensure-3d-axis (gca)))
+         (plt (apply 'pymethod (axis-handle ax) "plot_trisurf" x y z
+                     :axlim_clip t
+                     (append
+                      (when cmap (list :cmap (sampled-colormap-to-cmap cmap)))
+                      (when facealpha (list :alpha facealpha))
+                      (when edgecolor (list :edgecolor edgecolor))
+                      (when mesh-only (list :color '(0 0 0 0)))
+                      (when facecolor (list :color facecolor))
+                      (when linewidth (list :linewidth linewidth))))))
+    (when show-colorbar
+      (pymethod (figure-handle (axis-figure ax))
+                "colorbar"
+                plt
+                :ax (axis-handle ax)
+                :shrink 0.5
+                :aspect 10))
     (draw-axis ax)))
 
 (defun sqr (x) (* x x))
@@ -1500,3 +1516,16 @@
   (surf-random-data)
   (new-figure :window-title "Errorbar demo")
   (plot-random-points :ax nil))
+
+(defun mpl/scatter (x y z &key marker markersize/s (cmap "viridis") (ax (gca)) (show-colorbar cmap))
+  (when (arrayp cmap)
+    (setf cmap (sampled-colormap-to-cmap cmap)))
+  (let ((sc (pymethod (axis-handle ax) "scatter" x y
+                      :c z :cmap cmap
+                      :marker (or marker "o")
+                      :s (or markersize/s 16))))
+    (when show-colorbar
+      (pymethod (figure-handle (axis-figure ax))
+                "colorbar" sc :ax (axis-handle ax))))
+  (draw-axis ax))
+  
