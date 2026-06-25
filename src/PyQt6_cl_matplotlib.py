@@ -297,6 +297,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setWindowTitle(title)
+        self.setMinimumSize(400,400)
         # Need a central widget otherwise cannot access all four dock areas
         # But it also sometimes is the cause of the TopDockWidgetArea getting
         # small.  When no one is docked, maybe I have to re-add a Central Widget?
