@@ -74,6 +74,8 @@
    #:mpl/contour
    #:mpl/set-axis-tick-props
    #:mpl/set-legend-props
+   #:mpl/legend-visible?
+   #:mpl/legend-exists?
    #:renumber-figure
    #:set-window-title
    #:close-figure
@@ -94,7 +96,16 @@
    #:mpl/axis-equal
    #:mpl/plot-bar
    #:mpl/suptitle
-   #:mpl/scatter)
+   #:mpl/scatter
+   #:mpl/pcolormesh
+   #:mpl/get-colorbar
+   #:mpl/set-colorbar-label
+   #:mpl/surf-data
+   #:mpl/plot-polygon
+   #:mpl/shoelace
+   #:mpl/trisurf*
+   #:mpl/modify-title-text
+   #:mpl/link-axis)
   (:documentation "Wrapper around much of matplotlib functionality focusing on its
  use in interactive plotting and data exploration.  The focus is on drawing and
  modifying a plot so follows the 'matlab' style where one has an 'active figure' and
@@ -116,8 +127,8 @@
 
 ;; venv support
 ;;(setf (py4cl2:config-var 'py4cl2:pycmd) "/home/tester/ajb/TYPHON-USER-DEV/cl-matplotlib/.venv/bin/python")
-(setf (py4cl2:config-var 'py4cl2:numpy-pickle-lower-bound) 300)
-(save-config)
+;;(setf (py4cl2:config-var 'py4cl2:numpy-pickle-lower-bound) 300)
+;; (save-config)
 
 ;; You need to install all the relevant python packages
 ;;  matplotlib
@@ -153,18 +164,20 @@
   (layout-info nil) ;; for automatic tiled layout and stuff
   (window-title "" :type string)
   (tiled-layout-request '(1 1)) ;; '(2 2) for example, or :flow
-  (number (- (expt 2 32) 1) :type (unsigned-byte 32))) ;; unique session identifier
+  (number (- (expt 2 32) 1) :type (unsigned-byte 32)) ;; unique session identifier
+  (interactive-labels nil)) ;; stores interactive label handles so they don't get gc'ed
 
 (defstruct axis
   (handle nil) ;; a python handle
   (figure (make-figure) :type figure)
   (subplot nil)
-  (colorbar nil)) ;; a python handle, is hard to find otherwise
+  (colorbar nil) ;; a python handle, is hard to find otherwise
+  (interactive-legends nil)) ;; stores interactive-legend handles so they don't get gc'ed
 
 (defmethod print-object ((obj axis) stream)
   (print-unreadable-object (obj stream)
     (let ((figure (axis-figure obj)))
-      (format stream "AXIS of #~A '~A'" (figure-number figure) (figure-window-title figure)))))
+      (format stream "AXIS ~A of #~A '~A'" (axis-subplot obj) (figure-number figure) (figure-window-title figure)))))
 
 (defvar *current-figure* nil
   "Should be bound locally, except of interaction at the REPL which will use this
@@ -292,28 +305,31 @@
     (setf *current-figure* (register-new-figure figure-number window-title figure-handle layout
                                                 tiled-layout-request))))
 
-(defun mpl/figure (identifier &optional (fuzzy-match nil))
+(defun mpl/figure (identifier &key (fuzzy-match nil) (layout "tabbed"))
   "identifier is either the window title or the identifier used in a previous
  call to figure.  Sets the *current-figure* to the new or found figure.  If
  you are identifying a figure by the window name, you can use fuzzy-match t to
  try avoid having to type the full name."
+  (let ((delay-raise nil))
     (labels ((new-fig (name/number)
-             (new-figure
-              :window-title (if (stringp name/number)
-                                name/number
-                                (get-unused-window-title))
-              :figure-number (if (numberp name/number)
-                                 name/number
-                                 (get-unique-figure-number)))))
-    (if identifier
-        (let ((figure (or (get-figure identifier)
-                          (find-figure identifier fuzzy-match)
-                          (new-fig identifier))))
-          (mpl/set-figure-active figure)
-          (raise-figure figure nil))
-        (progn (mpl/set-figure-active (new-fig nil))
-               (raise-figure *current-figure* t)))
-    *current-figure*))
+               (setf delay-raise t)
+               (new-figure
+                :window-title (if (stringp name/number)
+                                  name/number
+                                  (get-unused-window-title))
+                :figure-number (if (numberp name/number)
+                                   name/number
+                                   (get-unique-figure-number))
+                :layout layout)))
+      (if identifier
+          (let ((figure (or (get-figure identifier)
+                            (find-figure identifier fuzzy-match)
+                            (new-fig identifier))))
+            (mpl/set-figure-active figure)
+            (raise-figure figure delay-raise))
+          (progn (mpl/set-figure-active (new-fig nil))
+                 (raise-figure *current-figure* delay-raise)))
+      *current-figure*)))
 
 (defun delete-figure& (figure-number)
   "Does not close the window, that should be done by calling close-window&
@@ -494,19 +510,6 @@
             (loop repeat 3 collect (random 10)))
   (draw-axis ax))
 
-(defun show-callback-demo (&optional (window-title "Callback demo"))
-  (let* ((fig (or (find-figure-with-window-title window-title)
-                  (new-figure :window-title window-title)))
-         (ax (add-subplot fig)))
-    (pymethod (axis-handle ax) "plot" '(1 2 3) '(3 1 2))
-    (pymethod (figure-handle fig) "subplots_adjust" :bottom 0.2)
-    (let* ((button-ax (pymethod (figure-handle fig) "add_axes" '(0.7 0.05 0.1 0.075)))
-           (button (pycall "matplotlib.widgets.Button" button-ax "boo")))
-      (pymethod button "on_clicked" (lambda (event)
-                                      (draw ax event)))
-      ;; store button to prevent it from getting gc'ed
-      (setf (pyslot-value (figure-handle fig) "button") button))))
-
 (defun start-loop ()
   "Call this to start the main gui loop"
   (start-up/internal)
@@ -519,7 +522,18 @@
                    (values))
                  (lambda (unique-figure-id)
                    (delete-figure& unique-figure-id)
-                   (values)))
+                   (values))
+                 (lambda (unique-figure-id)
+                   (mpl/set-figure-active unique-figure-id)
+                   (let ((ax (figure-current-axis *current-figure*)))
+                     (when ax
+                       (let ((l (py4cl2:pymethod (axis-handle ax) "get_legend")))
+                         (if (and l (not (equal l "None")))
+                             (progn
+                               (pymethod l "set_visible"
+                                         (if (eql (pymethod l "get_visible") t) nil t))
+                               (draw-axis ax))
+                             (mpl/legend)))))))
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
@@ -527,18 +541,10 @@
   (pyeval "plt.ion()")  ;; this is critical otherwise redrawing doesn't happen without a plt:pause call
   (pyeval "matplotlib.style.use('fast')")
   (pyexec "matplotlib.rcParams['axes.formatter.use_mathtext'] = True")
-  (py4cl2::pyexec "matplotlib.rcParams['axes.formatter.useoffset'] = False")
+  (pyexec (format nil "matplotlib.rcParams['savefig.directory'] = '~A'"
+                  *default-pathname-defaults*))
+  (pyexec "matplotlib.rcParams['axes.formatter.useoffset'] = False")
   (setf *loop-started* t))
-
-(defun try-interactive-plot ()
-  "This code uses python for interactivity"
-  (unless *loop-started* (start-loop))
-  (pyexec "import matplotlib")
-  (pyexec "import test_interactive_plot as test")
-  (let ((plt (pyeval "test.testPlot()")))
-    (pycall "test.testPlot.load_config" plt "/opt/sbcl/quicklisp/local-projects/cl-matplotlib/src/config.yaml")
-    (pycall "test.testPlot.generate_data" plt)
-    (values plt (pycall "test.testPlot.make_plot" plt nil))))
 
 (defun export-gaussian ()
   (py4cl2:export-function (lambda (x) (/ (exp (- (* x x)))
@@ -546,7 +552,7 @@
 
 (defun mpl/gcf (&optional window-title)
   "If title-provided, then will create a figure if one does not
- currently exist."
+ currently exist. Returns the figure struct of the currently active figure."
   (or *current-figure*
       (setf *current-figure* (new-figure :window-title window-title))))
 
@@ -590,7 +596,7 @@
       ((is "w" "white") '(1.0 1.0 1.0))
       (t (error "Unknown color ~A" color)))))
 
-(defvar *color-set* #((0.0 0.0 1.0) (1.0 0.0 0.0) (0.0 1.0 0.0) (0.0 0.0 0.0) (1.0 0.0 1.0) (0.0 1.0 1.0) (1.0 1.0 0.0)))
+(defvar *color-set* #((0d0 0d0 1d0) (1d0 0d0 0d0) (0d0 1d0 0d0) (0d0 0d0 0d0) (1d0 0d0 1d0) (0d0 1d0 1d0) (0d0 1d0 0d0)))
 
 (defun find-next-color (axis)
   "Only works if user sticks with the primary colors in *color-set*."
@@ -613,9 +619,16 @@
   "May create a new figure.  Always returns an axis."
   (or ax (gca figure-title)))
 
-(defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") ax (label "") markerfacecolor
+(defun make-trace-name (displayname hide-in-legend)
+  (cond (hide-in-legend "_")
+        ((and (or (string= displayname "") (not displayname)) (not hide-in-legend))
+         (format nil "data-~A"
+                 (count-if (lambda (x) (or (pycall "isinstance" x '|matplotlib.lines.Line2D|)))
+                           (pymethod (axis-handle (gca)) "get_children"))))
+        (displayname displayname)))
+
+(defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") markersize ax (label "") markerfacecolor
                                         markeredgecolor hide-in-legend)
-  (unless *loop-started* (start-loop))
   (setf ax (get-axis! ax))
   (unless color
     (setf color (find-next-color ax)))
@@ -626,9 +639,10 @@
             :markeredgecolor (or markeredgecolor color "None")
             :markerfacecolor (or markerfacecolor color "None")
             :marker (or marker "None")
-            :capsize 3.0
-            :label (if hide-in-legend "_" label)
-            :color color)
+            :capsize 3d0
+            :label (make-trace-name label hide-in-legend)
+            :color color
+            :markersize (or markersize "None"))
   (draw-axis ax)
   ax)
 
@@ -636,8 +650,7 @@
   "May create a new figure.  Always returns a figure."
   (mpl/gcf figure-title))
 
-(defun plot-xy-data (x y &key linestyle color (marker "o") ax label hide-in-legend)
-  (unless *loop-started* (start-loop))
+(defun plot-xy-data (x y &key linestyle color (marker "o") markersize ax label hide-in-legend)
   (when (and x y)
     (setf ax (get-axis! ax))
     (unless color
@@ -646,7 +659,8 @@
               :linestyle (or linestyle "None")
               :color (or color "None")
               :marker (or marker "None")
-              :label (if hide-in-legend "_" (or label "")))
+              :markersize (or markersize "None")
+              :label (make-trace-name label hide-in-legend))
     (draw-axis ax)
     ax))
 
@@ -663,7 +677,6 @@
               (add-subplot (axis-figure ax) (axis-subplot ax) "3d")))))
 
 (defun scatter-3d (x y z &key linestyle color (marker "o") ax markersize colormap facecolor markerfacecolor displayname linewidth hide-in-legend markeredgecolor)
-  (unless *loop-started* (start-loop))
   (when (and x y z)
     (pyexec "import matplotlib")
     (pyexec "from mpl_toolkits.mplot3d import Axes3D")
@@ -681,40 +694,67 @@
               (when colormap (list :cmap colormap))
               (when markerfacecolor (list :markerfacecolor markerfacecolor))
               (when markeredgecolor (list :markeredgecolor markeredgecolor))
-              (when displayname (list :label (if hide-in-legend "_" (or displayname ""))))))
+              (when displayname (list :label (make-trace-name displayname hide-in-legend)))))
       (draw-axis ax))))
 
-(defun mpl/xlabel (string &key (ax (gca)) (draw t) fontsize)
-  "Text in $ $ will be interpreted as LaTex. Don't forget \\"
-  ;; (xlabel "Resistance ($\\Omega$)")
+(defun mpl/xlabel (string &key (ax (gca)) (draw t) fontsize fontweight color)
+  "Text in $ $ will be interpreted as LaTex. Don't forget \\, for example
+' 'Resistance ($\\Omega$)'"
   (assert ax nil "No current axis")
   (apply 'pymethod (axis-handle ax) "set_xlabel" string
-         (when fontsize (list :fontsize fontsize)))
+         (append
+          (when fontsize (list :fontsize fontsize))
+          (when fontweight (list :fontweight fontweight))
+          (when color (list :color color))))
   (when draw (draw-axis ax)))
 
-(defun mpl/ylabel (string &key (ax (gca)) (draw t) fontsize)
-  "Text in $ $ will be interpreted as LaTex. Don't forget \\"
-  ;; (ylabel "Resistance ($\\Omega$)")
+(defun mpl/ylabel (string &key (ax (gca)) (draw t) fontsize fontweight color)
+  "Text in $ $ will be interpreted as LaTex. Don't forget \\, for example
+' 'Resistance ($\\Omega$)'"
   (assert ax nil "No current axis")
   (apply 'pymethod (axis-handle ax) "set_ylabel" string
-         (when fontsize (list :fontsize fontsize)))
+         (append
+          (when fontsize (list :fontsize fontsize))
+          (when fontweight (list :fontweight fontweight))
+          (when color (list :color color))))
   (when draw (draw-axis ax)))
 
-(defun mpl/zlabel (string &key (ax (gca)) (draw t) fontsize)
-  "Text in $ $ will be interpreted as LaTex. Don't forget \\"
-  ;; (ylabel "Resistance ($\\Omega$)")
+(defun mpl/zlabel (string &key (ax (gca)) (draw t) fontsize fontweight color)
+  "Text in $ $ will be interpreted as LaTex. Don't forget \\, for example
+' 'Resistance ($\\Omega$)'"
   (assert ax nil "No current axis")
   (when (string= (pyslot-value (axis-handle ax) "name") "3d")
     (apply 'pymethod (axis-handle ax) "set_zlabel" string
-           (when fontsize (list :fontsize fontsize)))
+           (append
+            (when fontsize (list :fontsize fontsize))
+            (when fontweight (list :fontweight fontweight))
+            (when color (list :color color))))
     (when draw (draw-axis ax))))
 
-(defun mpl/title (string &key (ax (gca)) (draw t) fontsize)
-  "Text in $ $ will be interpreted as LaTex. Don't forget \\"
-  ;; (title "My happy e$\\chi$periment")
+(defun mpl/modify-title-text (string &key (action :append) (ax (gca)))
+  "Appends string to title if specified with action :append or replaces it
+ if :replace.  Keeps fontsize, fontweight, color.  To build a new title call
+ mpl/title.  To change fonts try mpl/set-title-props."
+  (let ((title (pyslot-value (axis-handle ax) "title")))
+    (assert title)
+    (pymethod title "set_text"
+              (ecase action
+                (:append (concatenate 'string (pymethod title "get_text")
+                                      (format nil "~%~A" string)))
+                (:replace string))))
+    (draw-axis ax))
+
+(defun mpl/title (string &key (ax (gca)) (draw t) fontsize fontweight color)
+  "Text in $ $ will be interpreted as LaTex. Don't forget \\, like
+ (title 'My happy e$\\chi$periment')"
   (assert ax nil "No current axis")
-  (apply 'pymethod (axis-handle ax) "set_title" string
-         (when fontsize (list :fontsize fontsize)))
+  (let ((title
+          (apply 'pymethod (axis-handle ax) "set_title" string
+                 (append
+                  (when fontsize (list :fontsize fontsize))
+                  (when fontweight (list :fontweight fontweight))
+                  (when color (list :color color))))))
+    (push (pycall "PyQt6_cl_matplotlib.enable_draggable_title" title) (figure-interactive-labels (axis-figure ax))))
   (when draw (draw-axis ax)))
 
 (defun mpl/grid (&key (switch :on) (which :major) (ax (gca)) (draw t))
@@ -726,34 +766,37 @@
 
 (defun mpl/xlim (x0 x1 &key (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod (axis-handle ax) "set_xlim" x0 x1)
+  (pymethod (axis-handle ax) "set_xlim" (coerce x0 'double-float) (coerce x1 'double-float))
   (when draw (draw-axis ax)))
 
 (defun mpl/ylim (y0 y1 &key (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod (axis-handle ax) "set_ylim" y0 y1)
+  (pymethod (axis-handle ax) "set_ylim" (coerce y0 'double-float) (coerce y1 'double-float))
   (when draw (draw-axis ax)))
 
 (defun mpl/zlim (z0 z1 &key (ax (gca)) (draw t))
   (assert ax nil "No current axis")
-  (pymethod (axis-handle ax) "set_zlim" z0 z1)
+  (pymethod (axis-handle ax) "set_zlim" (coerce z0 'double-float) (coerce z1 'double-float))
   (when draw (draw-axis ax)))
 
 (defun sampled-colormap-to-cmap (sampled-colormap)
-  (assert (typep sampled-colormap 'array))
-  (py4cl2:pycall "matplotlib.colors.ListedColormap" sampled-colormap))
+  (pycall "matplotlib.colors.ListedColormap" sampled-colormap))
 
 (defun mpl/surf-data (x y z &key cmap)
+  "x, y, and z must be NxM arrays"
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
+  (when (and cmap (not (stringp cmap)) (arrayp cmap))
+    (setf cmap (sampled-colormap-to-cmap cmap)))
   (unless cmap
     (setf cmap (pyeval "matplotlib.cm.coolwarm")))
-  (let* ((fig (new-figure :window-title "3D Plot Demo"))
-         (ax (add-subplot fig 111 "3d"))
-         (surf (pymethod (axis-handle ax) "plot_surface" x y z
-                         :cmap cmap :linewidth 0 :antialiased nil
-                         :axlim_clip t)))
-    (pymethod (figure-handle fig) "colorbar" surf :shrink 0.5 :aspect 5)
+  (let* ((ax (ensure-3d-axis (gca))))
+    (maybe-remove-axis-colorbar ax)
+    (let* ((surf (pymethod (axis-handle ax) "plot_surface" x y z
+                           :cmap cmap :linewidth 0 :antialiased nil
+                           :axlim_clip t))
+           (cb (pymethod (figure-handle (axis-figure ax)) "colorbar" surf :shrink 0.5 :aspect 5)))
+      (setf (axis-colorbar ax) cb))
     (draw-axis ax)
     ax))
 
@@ -763,23 +806,57 @@
   "When mesh-only, cmap should be "
   (pyexec "import matplotlib")
   (pyexec "from mpl_toolkits.mplot3d import Axes3D")
-  (let* ((ax (ensure-3d-axis (gca)))
-         (plt (apply 'pymethod (axis-handle ax) "plot_trisurf" x y z
-                     :axlim_clip t
-                     (append
-                      (when cmap (list :cmap (sampled-colormap-to-cmap cmap)))
-                      (when facealpha (list :alpha facealpha))
-                      (when edgecolor (list :edgecolor edgecolor))
-                      (when mesh-only (list :color '(0 0 0 0)))
-                      (when facecolor (list :color facecolor))
-                      (when linewidth (list :linewidth linewidth))))))
-    (when show-colorbar
-      (pymethod (figure-handle (axis-figure ax))
-                "colorbar"
-                plt
-                :ax (axis-handle ax)
-                :shrink 0.5
-                :aspect 10))
+  (let* ((ax (ensure-3d-axis (gca))))
+    (maybe-remove-axis-colorbar ax)
+    (let ((plt (apply 'pymethod (axis-handle ax) "plot_trisurf" x y z
+                      :axlim_clip t
+                      (append
+                       (when cmap (list :cmap (sampled-colormap-to-cmap cmap)))
+                       (when facealpha (list :alpha facealpha))
+                       (when edgecolor (list :edgecolor edgecolor))
+                       (when mesh-only (list :color '(0 0 0 0)))
+                       (when facecolor (list :color facecolor))
+                       (when linewidth (list :linewidth linewidth))))))
+      (when show-colorbar
+        (let ((cb (pymethod (figure-handle (axis-figure ax))
+                            "colorbar" plt
+                            :ax (axis-handle ax) :shrink 0.5 :aspect 10)))
+          (setf (axis-colorbar ax) cb))))
+    (draw-axis ax)))
+
+(defun mpl/trisurf* (triangles x y z &key cmap facealpha (edgecolor "None")
+                         mesh-only facecolor linewidth
+                         show-colorbar)
+  "triangles should be indices into the x y z arrays... we subtract one
+ because they are assumed generated matlab style with 1 indexing, boo."
+  (pyexec "import matplotlib")
+  (pyexec "from mpl_toolkits.mplot3d import Axes3D")
+  (let* ((ax (ensure-3d-axis (gca))))
+    (maybe-remove-axis-colorbar ax)
+    (let ((better-triangles (make-array (array-dimensions triangles)
+                                        :element-type 'fixnum)))
+      (dotimes (i (array-dimension triangles 0))
+        (dotimes (j (array-dimension triangles 1))
+          (setf (aref better-triangles i j) (aref triangles i j))))
+      (setf triangles better-triangles))
+    (let ((plt (apply 'pymethod (axis-handle ax) "plot_trisurf"
+                      x
+                      y
+                      z
+                      :triangles triangles
+                      :axlim_clip t
+                      (append
+                       (when cmap (list :cmap (sampled-colormap-to-cmap cmap)))
+                       (when facealpha (list :alpha facealpha))
+                       (when edgecolor (list :edgecolor edgecolor))
+                       (when mesh-only (list :color '(0 0 0 0)))
+                       (when facecolor (list :color facecolor))
+                       (when linewidth (list :linewidth linewidth))))))
+      (when show-colorbar
+        (let ((cb (pymethod (figure-handle (axis-figure ax))
+                            "colorbar" plt
+                            :ax (axis-handle ax) :shrink 0.5 :aspect 10)))
+          (setf (axis-colorbar ax) cb))))
     (draw-axis ax)))
 
 (defun sqr (x) (* x x))
@@ -842,34 +919,41 @@
                   (pymethod axes "get_children")))
        (pymethod (figure-handle fig) "get_axes")))
 
-(defun mpl/apply-colormap (cmap &key min/max (clip t))
+(defun mpl/apply-colormap (cmap &key min max (clip t))
   "Apply a new colormap to an existing colormap image.  min/max and clip determine
  how the colormap is applied."
   (let* ((ax (gca))
          (scalable (mpl/find-scalar-mappable)))
-    (when min/max
+    (when (and min max)
       (py4cl2:pymethod scalable "set_norm"
                        (py4cl2:pycall "matplotlib.colors.Normalize"
-                                      :vmin (first min/max) :vmax (second min/max)
+                                      :vmin min :vmax max
                                       :clip clip)))
     (py4cl2:pymethod scalable "set_cmap"
                      (cl-matplotlib:sampled-colormap-to-cmap cmap))
     (draw-axis ax)))
 
-(defun mpl/add-colorbar (colormap-min colormap-max
-                     &key (figure *current-figure*) (axis (figure-current-axis figure))
+(defun maybe-remove-axis-colorbar (axis)
+  (when (axis-colorbar axis)
+    (py4cl2:pymethod (axis-colorbar axis) "remove")
+    (setf (axis-colorbar axis) nil)))
+
+(defun mpl/add-colorbar (&key (axis (gca))
+                              (figure (axis-figure axis))
                        (cmap "viridis") (clip t) ticks ticklabels label interpreter
+                       min max
                        apply)
   "This will add a colorbar image to the plot.  IF you want to also apply the colormap
  to the figure (replacing any one that was used during the plot call) then specify :apply t."
   (declare (ignorable interpreter))
   (when ticklabels (assert (= (length ticks) (length ticklabels))))
   ;; Need to delete an old colorbar if it is there
-  (when (axis-colorbar axis)
-    (py4cl2:pymethod (axis-colorbar axis) "remove")
-    (setf (axis-colorbar axis) nil))
-  (let ((norm (pycall "matplotlib.colors.Normalize"
-                      :vmin colormap-min :vmax colormap-max :clip clip)))
+  (maybe-remove-axis-colorbar axis)
+  (let ((norm (apply 'pycall "matplotlib.colors.Normalize"
+                     (append
+                      (when min (list :vmin min))
+                      (when max (list :vmax max))
+                      (when clip (list :clip clip))))))
     (prog1
         (let ((colorbar
                 (apply 'py4cl2:pymethod
@@ -886,7 +970,7 @@
           (when (or ticks ticklabels)
             (py4cl2:pymethod colorbar "set_ticks" ticks :labels (or ticklabels ticks))))
       (when apply
-        (mpl/apply-colormap cmap :min/max (list colormap-min colormap-max) :clip clip))
+        (mpl/apply-colormap cmap :min min :max max :clip clip))
       (draw-axis axis))))
 
 (defun mpl/get-colormap (name)
@@ -1026,6 +1110,19 @@
       (py4cl2:pymethod l "set_visible" nil)
       (draw-axis ax))))
 
+
+(defun mpl/legend-exists? (&key (ax (gca)))
+  "Returns the legend if it exist, otherwise NIL"
+  (let ((l (py4cl2:pymethod (axis-handle ax) "get_legend")))
+    (if (and l (not (equalp l "None")))
+        l
+        nil)))
+
+(defun mpl/legend-visible? (&key (ax (gca)))
+  (let ((l (mpl/legend-exists? :ax ax)))
+    (assert l nil "LEGEND has not been created")
+    (pymethod l "get_visible")))
+
 (defun mpl/show-legend (&key (ax (gca)))
   "Returns T if successfully (there was a pre-existing legend) or NIL if not"
   (let ((l (py4cl2:pymethod (axis-handle ax) "get_legend")))
@@ -1035,14 +1132,30 @@
                t)
         nil)))
 
-(defun mpl/legend (&key (ax (gca)) title location fontsize facecolor (framealpha 1.0)
-                          legend-entries (ncol 1) labelcolor bbox-to-anchor
-                     fontweight)
-  "location is 'upper left' best etc"
-  (let ((leg (apply 'py4cl2:pymethod (axis-handle ax) "legend"
+(defun mpl/relabel-data-series-with-labels (data-series-labels)
+  "If someone calls (legend '(label-a label-b)) we actually go and label the
+ data-series with those labels."
+  (let* ((ax (gca))
+         (children (pymethod (axis-handle ax) "get_children")))
+    (loop while data-series-labels
+          for child across children
+          for is-line = (pycall "isinstance" child '|matplotlib.lines.Line2D|)
+          when is-line
+            do (pymethod child "set_label" (pop data-series-labels)))
+    (assert (null data-series-labels))))
+
+(defun mpl/legend (&key (ax (gca)) title location fontsize facecolor framealpha
+                     legend-entries ncol labelcolor bbox-to-anchor
+                     fontweight title-fontsize)
+  "location is 'upper left' best etc."
+  (pyexec "from PyQt6_cl_matplotlib import enable_legend_interactivity")
+  (when legend-entries
+    (mpl/relabel-data-series-with-labels legend-entries))
+  (let ((leg (apply 'py4cl2:pymethod (axis-handle ax)
+                    "legend"
                     (append
-                     (when legend-entries (list legend-entries))
                      (when title (list :title title))
+                     (when title-fontsize (list :title_fontsize title-fontsize))
                      (when ncol (list :ncol ncol))
                      (when location (list :loc location))
                      (when fontsize (list :fontsize fontsize))
@@ -1051,7 +1164,11 @@
                      (when labelcolor (list :labelcolor labelcolor))
                      (when fontweight (list :fontweight fontweight))
                      (when bbox-to-anchor (list :bbox_to_anchor bbox-to-anchor))))))
-    (pymethod leg "set_draggable" t))
+    (pymethod leg "set_draggable" t)
+    ;; We need to keep the interactive legend object alive, so
+    ;; we stuff it into the axes object
+    (push (pycall "enable_legend_interactivity" (axis-handle ax) leg)
+          (axis-interactive-legends ax)))
   (draw-axis ax))
 
 (defun mpl/set-legend-string-on-last-data-series (legend-string &key (show-legend t))
@@ -1065,13 +1182,14 @@
              (pymethod child "set_label" legend-string))
     (when show-legend (mpl/legend))))
 
-(defun mpl/set-legend-title (title &key (ax (gca)) fontsize fontweight)
+(defun mpl/set-legend-title (title &key (ax (gca)) fontsize fontweight color)
   (let ((l (py4cl2:pymethod (axis-handle ax) "get_legend")))
     (unless l (setf l (mpl/legend :title title)))
     (pymethod l "set_title" title)
     (let ((title (pymethod l "get_title")))
       (when fontsize (pymethod title "set_fontsize" fontsize))
-      (when fontweight (pymethod title "set_fontweight" fontweight)))
+      (when fontweight (pymethod title "set_fontweight" fontweight))
+      (when color (pymethod title "set_color" color)))
     (draw-axis ax)))
 
 (defun mpl/view (azimuth elevation &optional (roll 0))
@@ -1099,7 +1217,7 @@
               (when width (list :width width))
               (when length (list :length length))
               (when pad (list :pad pad)))))
-    (when (and offset-text fontsize fontweight)
+    (when (and offset-text (or fontsize fontweight))
       (let* ((axis-name
                (ecase axis
                  (:x "xaxis")
@@ -1178,10 +1296,11 @@
 (defun mpl/get-grid-size (&optional (figure *current-figure*))
   "Returns [nrows ncols}"
   (when figure
-    (loop for obj across (pyslot-value (figure-handle figure) "axes")
-          for grid-spec = (pymethod obj "get_subplotspec")
-          when (not (equal grid-spec "None"))
-            return (coerce (subseq (pymethod grid-spec "get_geometry") 0 2) 'list))))
+    (or (figure-tiled-layout-request figure)
+        (loop for obj across (pyslot-value (figure-handle figure) "axes")
+              for grid-spec = (pymethod obj "get_subplotspec")
+              when (not (equal grid-spec "None"))
+                return (coerce (subseq (pymethod grid-spec "get_geometry") 0 2) 'list)))))
 
 (defun mpl/number-of-subplots (&optional (figure *current-figure*))
   (when figure
@@ -1202,6 +1321,22 @@
                  (incf count))
       (pymethod (figure-handle figure) "subplots_adjust")
     (draw-figure figure))))
+
+(defun mpl/link-axis (axis-to-link list-subplot-to-link &key (fig *current-figure*))
+  (assert (member axis-to-link '(:x :y)))
+  (let* ((axis (format nil "share~(~A~)" axis-to-link))
+         (subplot-axis (remove-if-not
+                        (lambda (ax)
+                          (destructuring-bind (nrows ncols grid-desc) (axis-subplot ax)
+                            (declare (ignore nrows ncols))
+                            (find grid-desc list-subplot-to-link :test #'equal)))
+                        (figure-axes fig))))
+    (destructuring-bind (first-axis . other-axes) subplot-axis
+      (map nil (lambda (ax)
+                 (py4cl2:pymethod (axis-handle first-axis) axis (axis-handle ax)))
+           other-axes)
+      (py4cl2:pymethod (axis-handle first-axis) "autoscale")
+      (draw-axis first-axis))))
 
 (defun mpl/plot-universal-time-series (data &key color marker linewidth linestyle displayname)
   "data is a list of universal-time (seconds) and numbers."
@@ -1247,11 +1382,17 @@
            (when fontsize (list :fontsize fontsize)))
     (draw-axis ax)))
 
+(defun to-sadf (seq)
+  (if (typep seq '(simple-array double-float (*)))
+      seq
+      (map '(simple-array double-float (*))
+           (lambda (d) (coerce d 'double-float)) seq)))
+
 (defun meshgrid (x y)
   "Upgrade x and y to two dimension arrays of (length x) x (length y).  Returns
  (values xmesh ymesh)."
-  (let* ((x (map '(simple-array double-float (*)) (lambda (d) (coerce d 'double-float)) x))
-         (y (map '(simple-array double-float (*)) (lambda (d) (coerce d 'double-float)) y))
+  (let* ((x (to-sadf x))
+         (y (to-sadf y))
          (dims (list (length x) (length y)))
          (xgrid (make-array dims :element-type 'double-float))
          (ygrid (make-array dims :element-type 'double-float)))
@@ -1265,20 +1406,47 @@
                    do (setf (aref ygrid x-idx y-idx) y-val)))
     (values xgrid ygrid)))
 
-(defun mpl/contour (x y zgrid &key linewidth levels show-labels)
-  "levels may be an integer or a sequence of numbers"
-  (let ((ax (gca)))
-    (multiple-value-bind (xgrid ygrid)
-        (meshgrid x y)
-      (assert (equal (array-dimensions xgrid) (array-dimensions zgrid)))
-      (let ((cs
-              (apply 'pymethod (axis-handle ax) "contour" xgrid ygrid zgrid
-                     (append
-                      (when levels (list :levels levels))
-                      (when linewidth (list :linewidths linewidth))))))
-        (when show-labels
-          (pymethod (axis-handle ax) "clabel" cs (pyslot-value cs "levels")))
-        cs))))
+(defun mpl/contour
+    (x y z &key linewidth levels show-labels cmap color linestyle (ax (gca)) filled)
+  "x y z may be 1d sequences, in which case we assume they are not rectilinear data,
+ or x and y are 1d and z is 2d, or x y and z are all 2d arrays.
+ COLOR, LINEWIDTH, LEVEL, and LINESTYLE may all be scalars or lists"
+  (when (and cmap (not (stringp cmap)))
+    (setf cmap (sampled-colormap-to-cmap cmap)))
+  (unless (or color cmap)
+    (setf cmap "viridis"))
+  (when (and color (not cmap))
+    (setf cmap (map 'list #'maybe-matlab-color-to-rgb color))
+    (setf color nil))
+  (let* ((rectilinear (and (arrayp z) (= (array-rank z) 2)))
+         (func-name (if rectilinear
+                        (if filled "contourf" "contour")
+                        (if filled "tricontourf" "tricontour"))))
+    (if (and rectilinear
+               (not (and (arrayp x) (arrayp y)
+                         (= (array-rank x) 2) (= (array-rank y) 2))))
+        (multiple-value-bind (xgrid ygrid)
+            (meshgrid x y)
+          (setf x xgrid y ygrid))
+        (setf x (to-sadf x) y (to-sadf y) z (to-sadf z)))
+    (let ((cs
+            (apply 'pymethod (axis-handle ax) func-name
+                   x y z
+                   (append
+                    (when linestyle (list :linestyle linestyle))
+                    (when levels (list :levels levels))
+                    (when linewidth (list :linewidths linewidth))
+                    (when cmap (list :cmap (if (stringp cmap)
+                                               cmap
+                                               (sampled-colormap-to-cmap cmap))))
+                    (when color (list :colors color))))))
+      (when show-labels
+        (if filled
+            (when cmap
+              (mpl/add-colorbar :cmap cmap))
+            (pymethod (axis-handle ax) "clabel" cs (pyslot-value cs "levels"))))
+      (draw-axis ax)
+      cs)))
 
 (defun mpl/draw-arrow (initial-pt final-pt &key arrow-type string color linestyle textcolor)
   "arrow-type: - <- -> <-> <|- -|> <|-|> ]- -[ ]-[ |-| ]-> <-[ simple fancy wedge"
@@ -1302,18 +1470,18 @@
                       :linestyle (or linestyle "-")))
     (draw-axis ax)))
 
-(defun mpl/draw-polygon (vertices &key (closed t) facecolor edgecolor linewidth alpha)
+(defun mpl/draw-polygon (vertices &key (closed t) facecolor edgecolor linewidth alpha displayname)
   "Polygons go behind data points so facecolor will not obscure them"
   (let ((polygon
           (pycall "matplotlib.patches.Polygon"
                   vertices :closed closed :facecolor (or facecolor "w")
                            :edgecolor (or edgecolor "k") :linewidth (or linewidth 1)
-                           :alpha (or alpha 1.0))))
+                           :alpha (or alpha 1.0) :label (or displayname ""))))
     (let ((ax (gca)))
       (pymethod (axis-handle ax) "add_patch" polygon)
       (draw-axis ax))))
 
-(defun mpl/set-line-prop (line &key linewidth color marker marker-size marker-facecolor marker-edgecolor alpha displayname visible-setting)
+(defun mpl/set-line-prop (line &key linewidth color marker marker-size marker-facecolor marker-edgecolor alpha displayname visible-setting hide-in-legend)
   (declare (type (member nil :visible :hidden) visible-setting))
   (when linewidth (pymethod line "set_linewidth" linewidth))
   (when color (pymethod line "set_color" color))
@@ -1326,11 +1494,13 @@
   (when visible-setting (pymethod line "set_visible"
                                   (case visible-setting
                                     (:visible t)
-                                    (:hidden nil)))))
+                                    (:hidden nil))))
+  (when hide-in-legend (pymethod line "set_label" ""))
+  )
 
-(defun mpl/set-all-line-props (&rest rest &key linewidth color marker  marker-size marker-facecolor marker-edgecolor alpha displayname visible-setting)
+(defun mpl/set-all-line-props (&rest rest &key linewidth color marker  marker-size marker-facecolor marker-edgecolor alpha displayname visible-setting hide-in-legend)
   (declare (ignore linewidth color marker alpha displayname visible-setting
-                   marker-size marker-facecolor marker-edgecolor))
+                   marker-size marker-facecolor marker-edgecolor hide-in-legend))
   (let* ((ax (gca))
          (lines (pycall "list" (pymethod (axis-handle ax) "get_lines"))))
     (map nil (lambda (line)
@@ -1423,7 +1593,7 @@
                    when (< d min)
                      do (setf min d)))
     (let* ((ax (gca))
-           (axh (cl-matplotlib::axis-handle ax))
+           (axh (axis-handle ax))
            (cmap (sampled-colormap-to-cmap colormap)))
       ;; should create the clipped colorbar mapping here...
       (py4cl2:pymethod axh "imshow" image-data
@@ -1432,7 +1602,7 @@
                        :aspect "auto" :origin "lower") ;; flip so matches matlab
       (let ((real-min (or colorbar-min min))
             (real-max (or colorbar-max max)))
-        (mpl/add-colorbar real-min real-max :cmap colormap :clip clip))
+        (mpl/add-colorbar :min real-min :max real-max :cmap colormap :clip clip))
       (draw-axis ax))))
 
 (defun mpl/caxis (min max &key (clip t) (ax (gca)))
@@ -1452,7 +1622,7 @@
   (py4cl2:pymethod (axis-handle ax) "set_aspect" "equal")
   (draw-axis ax))
 
-(defun mpl/plot-bar (data &key facecolor (barwidth 0.9) displayname facealpha edgecolor)
+(defun mpl/plot-bar (data &key facecolor (barwidth 0.9) displayname facealpha edgecolor hide-in-legend)
   "barwidth is normalized so that 1.0 means the closest two bars do not overlap."
   (let* ((xvals (remove-duplicates (sort (map 'list #'first data) #'<)))
          (min-spacing nil))
@@ -1474,14 +1644,15 @@
               (when edgecolor (list :edgecolor edgecolor))
               (when facecolor (list :color facecolor))
               (when facealpha (list :alpha facealpha))
-              (when displayname (list :label displayname))))
+              (when displayname (list :label (make-trace-name displayname hide-in-legend)))))
       (draw-axis ax))))
 
 (defun mpl/suptitle (suptitle &key fontsize)
   "Add a title to the top of a bunch of subplots"
-    (let ((fig (mpl/gcf)))
-    (py4cl2:pymethod (figure-handle fig) "suptitle" suptitle :fontsize fontsize)
-    (draw-figure fig)))
+    (let* ((fig (mpl/gcf))
+           (obj (py4cl2:pymethod (figure-handle fig) "suptitle" suptitle :fontsize fontsize)))
+      (push (pycall "PyQt6_cl_matplotlib.enable_draggable_title" obj) (figure-interactive-labels fig))
+      (draw-figure fig)))
 
 (defun plot-random-points (&key (N 10) (marker ".") (linestyle "-") (color "k") (errorbars t) (ax (gca)))
   (labels ((rand (&optional (scale 10d0))
@@ -1512,20 +1683,133 @@
   (clear-figure-tracking)
   (when start-loop (when (py4cl2:python-alive-p)
                      (pystop)) (start-loop))
-  (show-callback-demo)
+  (new-figure :window-title "Surface plot")
   (surf-random-data)
   (new-figure :window-title "Errorbar demo")
-  (plot-random-points :ax nil))
+  (plot-random-points))
 
-(defun mpl/scatter (x y z &key marker markersize/s (cmap "viridis") (ax (gca)) (show-colorbar cmap))
-  (when (arrayp cmap)
+(defun mpl/scatter (x y z &key marker markersize/s (cmap "viridis") (ax (gca)) (show-colorbar cmap) cmin cmax)
+  (when (and cmap (not (stringp cmap)))
     (setf cmap (sampled-colormap-to-cmap cmap)))
-  (let ((sc (pymethod (axis-handle ax) "scatter" x y
-                      :c z :cmap cmap
-                      :marker (or marker "o")
-                      :s (or markersize/s 16))))
+  (maybe-remove-axis-colorbar ax)
+  (let ((sc (apply 'pymethod
+                   (axis-handle ax) "scatter" x y
+                   :c z :cmap cmap :marker (or marker "o") :s (or markersize/s 16)
+                   (append
+                    (when cmin (list :vmin cmin))
+                    (when cmax (list :vmax cmax))))))
     (when show-colorbar
-      (pymethod (figure-handle (axis-figure ax))
-                "colorbar" sc :ax (axis-handle ax))))
+      (let ((cbar (pymethod (figure-handle (axis-figure ax))
+                            "colorbar" sc :ax (axis-handle ax))))
+        (setf (axis-colorbar ax) cbar))))
   (draw-axis ax))
   
+(defun mpl/pcolormesh (x y z &key (ax (gca)) (cmap "viridis") (shading "gouraud") (show-colorbar t) cmin cmax)
+  "z must be (length x) by (length y) 2D array"
+  (when (and cmap (not (stringp cmap)))
+    (setf cmap (sampled-colormap-to-cmap cmap)))
+  (maybe-remove-axis-colorbar ax)
+  (let ((im (apply 'pymethod
+                   (axis-handle ax) "pcolormesh" x y z
+                   :cmap cmap :shading shading
+                   (append
+                    (when cmin (list :vmin cmin))
+                    (when cmax (list :vmax cmax))))))
+    (when show-colorbar
+      (let ((cbar (pymethod (figure-handle (axis-figure ax))
+                            "colorbar" im :ax (axis-handle ax))))
+        (setf (axis-colorbar ax) cbar))))
+  (draw-axis ax))
+            
+(defun mpl/get-colorbar (ax)
+  "Return a colorbar object from this axis if it exists"
+  (or (axis-colorbar ax)
+      (map nil (lambda (collection)
+                 (let ((cb (ignore-errors (pyslot-value collection "colorbar"))))
+                   (when cb
+                     (return-from mpl/get-colorbar cb))))
+           (pycall "list" (pyslot-value (axis-handle ax) "collections")))))
+
+(defun mpl/set-colorbar-label (string &key (ax (gca)) (draw t) fontsize fontweight color)
+  "Text in $ $ will be interpreted as LaTex. Don't forget \\, like
+ (title 'My happy e$\\chi$periment')"
+  (assert ax nil "No current axis")
+  (let ((cb (mpl/get-colorbar ax)))
+    (assert cb nil "Did not find a colorbar")
+    (apply 'pymethod cb "set_label" string
+           (append
+            (when fontsize (list :fontsize fontsize))
+            (when fontweight (list :fontweight fontweight))
+            (when color (list :color color)))))
+  (when draw (draw-axis ax)))
+
+;; Matplotlib will handle filled polygons with holes well if the holes are
+;; all in the opposite direction of the outer polygon.
+;; TODO: if no facecolor, then don't bother with polygon manipulation (so ppl don't
+;;       see the cut/bridge.
+;; TODO: represent polys with holes going the other way.
+
+(defun close-polygon (polygon)
+  "2D polygon is a list of two element lists of numbers ((x0 y0) (x1 y1 )...).  Returns
+ a new POLYGON which is closed (and which shares the pairs (x0 y0) ...).  If the polygon
+ is already closed still returns a copy of the polygon."
+  (let* ((result (list nil))
+         (tail result))
+    (loop for a in polygon
+          for new = (cons a nil)
+          do (setf (cdr tail) new) (setf tail new))
+    (unless (equalp (car tail) (first polygon))
+      (setf (cdr tail) (cons (first polygon) nil)))
+    (cdr result)))
+
+(defun mpl/shoelace (polygon)
+  "Returns the area of a 2D polygon as a positive value if the polygon vertices are
+ represented is represented clockwise, or negative if counter-clockwise.  A POLYGON
+ is a list of two element lists of numbers ((x0 y0) (x1 y1) ...).  If the polygon is
+ not closed, will close it during the computation."
+  (let ((area 0))
+    (destructuring-bind (previous-x previous-y)
+        (elt polygon 0)
+      (map nil (lambda (v)
+                 (destructuring-bind (x y) v
+                   (incf area (- (* x previous-y) (* previous-x y)))
+                   (setf previous-x x previous-y y)))
+           (close-polygon polygon))
+      (* 0.5 area))))
+
+(defun mpl/plot-polygon
+    (exterior &key holes (ax (gca)) facecolor (edgecolor "black")
+                autoscale-axis (alpha 0.3) (fill (if (equal facecolor "none") nil t)))
+  "matplotlib will automatically handle filling correctly if holes go the opposite
+ direction of the outside.  Have to be careful to return from the holes back to the
+ last point of the polygon to avoid uncoloring other regions."
+  (unless facecolor (setf facecolor (find-next-color ax)))
+  (labels ((add-polygon (poly)
+             (pymethod (axis-handle ax)
+                       "add_patch"
+                       (pycall "matplotlib.patches.Polygon"
+                               poly
+                               :facecolor facecolor
+                               :edgecolor edgecolor
+                               :alpha alpha
+                               :fill fill))))
+    (let ((exterior-direction (signum (mpl/shoelace exterior))))
+      (setf holes
+            (map 'list (lambda (hole)
+                         (if (= (signum (mpl/shoelace hole)) exterior-direction)
+                             (reverse hole)
+                             hole))
+                 holes)))
+    ;; Make sure we return to the point where the hole drawing started
+    ;; so we don't end up with unfilled regions by accident when we have
+    ;; more than one hole.
+    (let ((exit-from-hole (car (last exterior))))
+      (add-polygon
+       (apply 'append exterior
+              (map 'list (lambda (hole)
+                           (append hole (list exit-from-hole)))
+                   holes))))
+    (draw-axis ax)
+    (when autoscale-axis
+      (pymethod (axis-handle ax) "autoscale_view"))
+    ax))
