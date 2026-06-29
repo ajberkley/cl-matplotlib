@@ -236,7 +236,7 @@ class MplDockWidget(QDockWidget):
         self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.figure.set_layout_engine(matplotlib.layout_engine.ConstrainedLayoutEngine())
-        #self.canvas.setFocus()
+        self.visibilityChanged.connect(self.on_visibility_changed)
         
     def on_key_press(self, event):
         # implement standard matplotlib keypress behavior
@@ -244,14 +244,17 @@ class MplDockWidget(QDockWidget):
             self.close_window()
         key_press_handler(event, self.canvas, self.toolbar)
 
+    def make_active(self):
+        axes = self.figure.get_axes()
+        if len(axes) > 0:
+            set_active_figure(self.unique_figure_id, self.figure.get_axes()[0])
+        else:
+            set_active_figure(self.unique_figure_id, None)
+
     def mousePressEvent(self, event: QMouseEvent):
         if not self.closed:
             if event.button() == Qt.MouseButton.LeftButton:
-                axes = self.figure.get_axes()
-                if len(axes) > 0:
-                    set_active_figure(self.unique_figure_id, self.figure.get_axes()[0])
-                else:
-                    set_active_figure(self.unique_figure_id, None)
+                self.make_active()
 
         super().mousePressEvent(event)
 
@@ -285,6 +288,11 @@ class MplDockWidget(QDockWidget):
             with other_windows_lock:
                 if self.floating:
                     to_be_docked.append(self)
+
+    def on_visibility_changed(self, visible: bool):
+        if visible:
+            # print(f"{self.unique_figure_id} is now visible")
+            self.make_active()
 
 def important_children(window):
     child_objects = window.children()

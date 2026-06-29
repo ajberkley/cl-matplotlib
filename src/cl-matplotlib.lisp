@@ -61,7 +61,6 @@
    #:mpl/set-axis-label-props
    #:mpl/set-title-props
    #:mpl/error-messages
-   #:mpl/number-of-subplots
    #:mpl/get-grid-size
    #:mpl/reflow-subplots
    #:mpl/set-figure-tiled-layout-request
@@ -105,7 +104,10 @@
    #:mpl/shoelace
    #:mpl/trisurf*
    #:mpl/modify-title-text
-   #:mpl/link-axis)
+   #:mpl/link-axis
+   #:mpl/next-subplot-grid
+   #:mpl/tripcolor
+   #:mpl/pcolor)
   (:documentation "Wrapper around much of matplotlib functionality focusing on its
  use in interactive plotting and data exploration.  The focus is on drawing and
  modifying a plot so follows the 'matlab' style where one has an 'active figure' and
@@ -236,11 +238,19 @@
       (when (stringp name) (find-figure-with-window-title name))))
 
 (defun mpl/set-figure-active (figure/figure-number)
+  (let ((oldfig *current-figure*))
+    (when oldfig
+      (pymethod (figure-dockwidget oldfig) "setWindowTitle"
+                (figure-window-title *current-figure*))))
   (if (typep figure/figure-number 'figure)
       (setf *current-figure* figure/figure-number)
       (let ((figure (get-figure figure/figure-number)))
         (assert figure nil "Figure with name ~A does not exist" figure/figure-number)
-        (setf *current-figure* figure))))
+        (setf *current-figure* figure)))
+  (let ((newfig *current-figure*))
+    (pymethod (figure-dockwidget newfig) "setWindowTitle"
+              (concatenate 'string "*" (figure-window-title newfig) "*")))
+  *current-figure*)
 
 (defun raise-figure (figure &optional (delay nil))
   "If the figure is new, we want to delay to give the gui loop a
@@ -291,7 +301,9 @@
     (assert (not (get-figure figure-number)) nil
             "Figure with number ~A already exists" figure-number))
   (unless window-title
-    (setf window-title (or figure-number (get-unused-window-title))))
+    (setf window-title (if figure-number
+                           (format nil "~A" figure-number)
+                           (get-unused-window-title))))
   (unless figure-number (setf figure-number (get-unique-figure-number)))
   (let ((figure-handle
           (pycall "PyQt6_cl_matplotlib.NewFigure" window-title figure-number
@@ -302,7 +314,7 @@
                   :tabbed (if (equalp layout "tabbed")
                               t
                               nil))))
-    (setf *current-figure* (register-new-figure figure-number window-title figure-handle layout
+    (mpl/set-figure-active (register-new-figure figure-number window-title figure-handle layout
                                                 tiled-layout-request))))
 
 (defun mpl/figure (identifier &key (fuzzy-match nil) (layout "tabbed"))
@@ -540,6 +552,7 @@
   (pyexec "import matplotlib; import matplotlib.pyplot as plt")
   (pyeval "plt.ion()")  ;; this is critical otherwise redrawing doesn't happen without a plt:pause call
   (pyeval "matplotlib.style.use('fast')")
+  (pyexec "matplotlib.rcParams['axes.formatter.limits'] = (-2, 2)")
   (pyexec "matplotlib.rcParams['axes.formatter.use_mathtext'] = True")
   (pyexec (format nil "matplotlib.rcParams['savefig.directory'] = '~A'"
                   *default-pathname-defaults*))
@@ -627,7 +640,7 @@
                            (pymethod (axis-handle (gca)) "get_children"))))
         (displayname displayname)))
 
-(defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") markersize ax (label "") markerfacecolor
+(defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") markersize ax (label "") markerfacecolor linewidth
                                         markeredgecolor hide-in-legend)
   (setf ax (get-axis! ax))
   (unless color
@@ -642,7 +655,8 @@
             :capsize 3d0
             :label (make-trace-name label hide-in-legend)
             :color color
-            :markersize (or markersize "None"))
+            :markersize (or markersize "None")
+            :linewidth (or linewidth 2))
   (draw-axis ax)
   ax)
 
@@ -650,9 +664,8 @@
   "May create a new figure.  Always returns a figure."
   (mpl/gcf figure-title))
 
-(defun plot-xy-data (x y &key linestyle color (marker "o") markersize ax label hide-in-legend)
+(defun plot-xy-data (x y &key linestyle color (marker "o") markersize label hide-in-legend (ax (gca)))
   (when (and x y)
-    (setf ax (get-axis! ax))
     (unless color
       (setf color (find-next-color ax)))
     (pymethod (axis-handle ax) "plot" x y
@@ -782,6 +795,14 @@
 (defun sampled-colormap-to-cmap (sampled-colormap)
   (pycall "matplotlib.colors.ListedColormap" sampled-colormap))
 
+(defun maybe-sampled-colormap-to-cmap (maybe-sampled-colormap)
+  "If MAYBE-SAMPLED-COLORMAP is an array of RGB / RGBA colors, make a python
+ object representing it.  If it's a string representation of a colormap
+ like viridis, leave it alone."
+  (if (stringp maybe-sampled-colormap)
+      maybe-sampled-colormap
+      (sampled-colormap-to-cmap maybe-sampled-colormap)))
+
 (defun mpl/surf-data (x y z &key cmap)
   "x, y, and z must be NxM arrays"
   (pyexec "import matplotlib")
@@ -878,28 +899,22 @@
       (mpl/title "Noisy Sync" :ax ax))))
 
 (defun save-preferred-size-figure/matplotlib
-    (filename &key (width-pixels 2000) (height-pixels 1440) (dpi 200) eps?
-                name-prefix name-suffix fig-handle sub-dir)
+    (filename &key (width-pixels 2000) (height-pixels 1440) (dpi 200) eps?)
+  "FILENAME is a full, absolute path to the destination file."
   ;; I think if name is specified it uses it, otherwise it
   ;; puts name-prefix figure-window-title name-suffix with some fiddling,
   ;; and tidying see build-figname
-  (assert filename)
-  (assert (not name-prefix))
-  (assert (not name-suffix))
-  (assert (not fig-handle))
-  (assert (not sub-dir))
-  (let ((fig *current-figure*)
-        (full-filename (if (or (search ".png" filename)
-                               (search ".pdf" filename)
-                               (search ".eps" filename))
-                           filename
-                           (format nil "~a.~a" filename
-                                   (if eps? "eps" "png")))))
+  (let* ((fig *current-figure*)
+         (full-filename (if (or (search ".png" filename)
+                                (search ".pdf" filename)
+                                (search ".eps" filename))
+                            filename
+                            (format nil "~a.~a" filename
+                                    (if eps? "eps" "png")))))
     (assert fig)
     (let ((old-size (pymethod (figure-handle fig) "get_size_inches")))
       (pymethod (figure-handle fig) "set_size_inches" (round width-pixels dpi) (round height-pixels dpi))
-      (pymethod (figure-handle fig) "savefig" full-filename
-                :dpi dpi)
+      (pymethod (figure-handle fig) "savefig" full-filename :dpi dpi)
       (pymethod (figure-handle fig) "set_size_inches" old-size)
       full-filename)))
 
@@ -909,6 +924,8 @@
     (pymethod (figure-handle figure) "clf")
     (setf (figure-current-axis figure) nil)
     (setf (figure-axes figure) nil)
+    (setf (figure-tiled-layout-request figure) '(1 1))
+    (setf (figure-interactive-labels figure) nil)
     (draw-figure figure)))
 
 (defun mpl/find-scalar-mappable (&optional (fig *current-figure*))
@@ -959,10 +976,7 @@
                 (apply 'py4cl2:pymethod
                        (figure-handle figure) "colorbar"
                        (py4cl2:pycall "matplotlib.cm.ScalarMappable"
-                                      :cmap
-                                      (if (stringp cmap)
-                                          cmap
-                                          (sampled-colormap-to-cmap cmap))
+                                      :cmap (maybe-sampled-colormap-to-cmap cmap)
                                       :norm norm)
                        :ax (axis-handle axis)
                        (when label (list :label label)))))
@@ -1004,8 +1018,8 @@
                      :transform (pymethod (axis-handle ax) "get_xaxis_transform")
                      :s label
                      :rotation orientation
-                     :horizontalalignment horizontal-alignment
-                     :verticalalignment vertical-alignment))
+                     :horizontalalignment (string-downcase horizontal-alignment)
+                     :verticalalignment (string-downcase vertical-alignment)))
   (draw-axis (gca)))
 
 (defun mpl/draw-horizontal-line (y &key (ax (gca)) (line-colour "k") (linewidth 1)
@@ -1029,8 +1043,8 @@
                      :transform (pymethod (axis-handle ax) "get_yaxis_transform")
                      :s label
                      :rotation orientation
-                     :horizontalalignment horizontal-alignment
-                     :verticalalignment vertical-alignment))
+                     :horizontalalignment (string-downcase horizontal-alignment)
+                     :verticalalignment (string-downcase vertical-alignment)))
   (draw-axis (gca)))
 
 (defun mpl/ginput (n)
@@ -1302,13 +1316,17 @@
               when (not (equal grid-spec "None"))
                 return (coerce (subseq (pymethod grid-spec "get_geometry") 0 2) 'list)))))
 
-(defun mpl/number-of-subplots (&optional (figure *current-figure*))
-  (when figure
-    (loop for obj across (pyslot-value (figure-handle figure) "axes")
-          when
-            ;; Kludge to remove colorbars
-            (not (equal (pymethod obj "get_subplotspec") "None"))
-          count 1)))
+(defun mpl/next-subplot-grid (&optional (figure *current-figure*))
+  "Returns the next subplot index (zero-based), aware of spanning subplots"
+  (when (null (figure-axes figure))
+    (return-from mpl/next-subplot-grid 0))
+  (let ((tiledlayout (figure-tiled-layout-request figure)))
+    (loop for axis in (figure-axes figure)
+          when (equal tiledlayout (subseq (axis-subplot axis) 0 2))
+            maximizing
+            (if (numberp (third (axis-subplot axis)))
+                (third (axis-subplot axis))
+                (apply #'max (third (axis-subplot axis)))))))
 
 (defun mpl/reflow-subplots (nrows ncols &optional (figure *current-figure*))
   (when figure
@@ -1331,11 +1349,16 @@
                             (declare (ignore nrows ncols))
                             (find grid-desc list-subplot-to-link :test #'equal)))
                         (figure-axes fig))))
+    (assert (= (length subplot-axis)
+               (length list-subplot-to-link))
+            nil (format nil "did not find all axes, options are ~{~A~^,~^ ~}"
+                        (mapcar (lambda (ax) (third (axis-subplot ax)))
+                                (figure-axes fig))))
     (destructuring-bind (first-axis . other-axes) subplot-axis
       (map nil (lambda (ax)
-                 (py4cl2:pymethod (axis-handle first-axis) axis (axis-handle ax)))
+                 (pymethod (axis-handle first-axis) axis (axis-handle ax)))
            other-axes)
-      (py4cl2:pymethod (axis-handle first-axis) "autoscale")
+      (pymethod (axis-handle first-axis) "autoscale")
       (draw-axis first-axis))))
 
 (defun mpl/plot-universal-time-series (data &key color marker linewidth linestyle displayname)
@@ -1382,11 +1405,11 @@
            (when fontsize (list :fontsize fontsize)))
     (draw-axis ax)))
 
-(defun to-sadf (seq)
+(defun to-sadf (seq &optional (key #'identity))
   (if (typep seq '(simple-array double-float (*)))
       seq
       (map '(simple-array double-float (*))
-           (lambda (d) (coerce d 'double-float)) seq)))
+           (lambda (d) (coerce (funcall key d) 'double-float)) seq)))
 
 (defun meshgrid (x y)
   "Upgrade x and y to two dimension arrays of (length x) x (length y).  Returns
@@ -1436,9 +1459,7 @@
                     (when linestyle (list :linestyle linestyle))
                     (when levels (list :levels levels))
                     (when linewidth (list :linewidths linewidth))
-                    (when cmap (list :cmap (if (stringp cmap)
-                                               cmap
-                                               (sampled-colormap-to-cmap cmap))))
+                    (when cmap (list :cmap cmap))
                     (when color (list :colors color))))))
       (when show-labels
         (if filled
@@ -1648,9 +1669,14 @@
       (draw-axis ax))))
 
 (defun mpl/suptitle (suptitle &key fontsize)
-  "Add a title to the top of a bunch of subplots"
+  "Add a title to the top of a bunch of subplots.  If you pass a list, new-lines
+ will be added between strings in the list."
     (let* ((fig (mpl/gcf))
-           (obj (py4cl2:pymethod (figure-handle fig) "suptitle" suptitle :fontsize fontsize)))
+           (obj (py4cl2:pymethod (figure-handle fig) "suptitle"
+                                 (if (listp suptitle)
+                                     (format nil "~{~A~^~%~}" suptitle)
+                                     suptitle)
+                                 :fontsize fontsize)))
       (push (pycall "PyQt6_cl_matplotlib.enable_draggable_title" obj) (figure-interactive-labels fig))
       (draw-figure fig)))
 
@@ -1813,3 +1839,40 @@
     (when autoscale-axis
       (pymethod (axis-handle ax) "autoscale_view"))
     ax))
+
+(defun mpl/tripcolor (triangles x y z &key (ax (gca)) (colormap "viridis") (show-colorbar t)
+                                        zmin zmax)
+  (maybe-remove-axis-colorbar ax)
+  (let* ((sc (apply 'pymethod
+                    (axis-handle ax) "tripcolor" x y z
+                    :triangles triangles
+                    :cmap (maybe-sampled-colormap-to-cmap colormap)
+                    (append
+                     (when zmin (list :vmin zmin))
+                     (when zmax (list :vmax zmax))))))
+      (when show-colorbar
+        (let ((cbar (pymethod (figure-handle (axis-figure ax))
+                              "colorbar" sc :ax (axis-handle ax))))
+          (setf (axis-colorbar ax) cbar)))
+    (draw-axis ax)))
+  
+(defun mpl/pcolor (data &key (ax (gca)) (colormap "viridis") (show-colorbar t)
+                          zmin zmax)
+  "Takes a sequence of '(x y z) points.  The x, y points may be non-uniformly
+ distributed (not grid like).  Generates a triangulation to cover the x y points and colors the
+ triangles with the scalar value in Z using the colormap specified.  colormap can be a string or an
+ array of RGB or RGBA values."
+  (maybe-remove-axis-colorbar ax)
+  (let* ((x (to-sadf data #'first))
+         (y (to-sadf data #'second))
+         (z (to-sadf data #'third))
+         (sc (apply 'pymethod (axis-handle ax) "tripcolor" x y z
+                    :cmap (maybe-sampled-colormap-to-cmap colormap)
+                    (append
+                     (when zmin (list :vmin zmin))
+                     (when zmax (list :vmax zmax))))))
+      (when show-colorbar
+        (let ((cbar (pymethod (figure-handle (axis-figure ax))
+                              "colorbar" sc :ax (axis-handle ax))))
+          (setf (axis-colorbar ax) cbar))))
+  (draw-axis ax))
