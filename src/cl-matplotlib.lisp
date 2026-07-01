@@ -187,7 +187,7 @@
  Logged plotting will use its own locally re-bound value for this.  A goal is to
  avoid interference between logged plotting and user interactive plotting.")
 
-(defvar *active-figures* (make-hash-table :test 'equal)
+(defvar *active-figures* (make-hash-table :test 'equal :synchronized t)
   "All visible figures will have an entry in this hash table from their global
  identifier to a python figure object.  Careful to keep this up-to-date to not
  leak memory on the lisp (and python) side.")
@@ -305,7 +305,9 @@
                            (format nil "~A" figure-number)
                            (get-unused-window-title))))
   (unless figure-number (setf figure-number (get-unique-figure-number)))
-  (let ((figure-handle
+  ;; Callbacks may happen on this figure as soon as NewFigure is called, so
+  ;; make sure we have the dock
+  (let* ((figure-handle
           (pycall "PyQt6_cl_matplotlib.NewFigure" window-title figure-number
                   :docked (if (or (string= layout "docked")
                                   (string= layout "tabbed"))
@@ -313,9 +315,11 @@
                               nil)
                   :tabbed (if (equalp layout "tabbed")
                               t
-                              nil))))
-    (mpl/set-figure-active (register-new-figure figure-number window-title figure-handle layout
-                                                tiled-layout-request))))
+                              nil)))
+         (fig (register-new-figure figure-number window-title figure-handle layout
+                                   tiled-layout-request)))
+    (mpl/set-figure-active fig)
+    fig))
 
 (defun mpl/figure (identifier &key (fuzzy-match nil) (layout "tabbed"))
   "identifier is either the window title or the identifier used in a previous
@@ -338,10 +342,12 @@
                             (find-figure identifier fuzzy-match)
                             (new-fig identifier))))
             (mpl/set-figure-active figure)
-            (raise-figure figure delay-raise))
-          (progn (mpl/set-figure-active (new-fig nil))
-                 (raise-figure *current-figure* delay-raise)))
-      *current-figure*)))
+            (raise-figure figure delay-raise)
+            figure)
+          (let ((figure (new-fig nil)))
+            (mpl/set-figure-active figure)
+            (raise-figure figure delay-raise)
+            figure)))))
 
 (defun delete-figure& (figure-number)
   "Does not close the window, that should be done by calling close-window&
@@ -473,7 +479,11 @@
   (unless figure
     (setf figure (new-figure)))
   (setf *current-figure* figure)
-  (setf subplot-id (parse-subplot-id (or subplot-id (append (figure-tiled-layout-request figure) '(1)))))
+  (let ((tiledlayout (figure-tiled-layout-request figure)))
+    (setf subplot-id (parse-subplot-id (or subplot-id
+                                           (if (listp tiledlayout)
+                                               (append tiledlayout '(1))
+                                               '(1 1 1))))))
   (destructuring-bind (nrows ncols grid-desc) subplot-id
     (let ((ax (find subplot-id (figure-axes figure) :key #'axis-subplot :test 'equal)))
       (if ax
@@ -529,8 +539,9 @@
   (py4cl2:pycall "PyQt6_cl_matplotlib.set_callbacks"
                  (lambda (unique-figure-id axis)
                    (unless (eql unique-figure-id -1)
-                     (mpl/set-figure-active unique-figure-id)
-                     (set-active-axis-handle axis))
+                     (ignore-errors ;; this callback may fire before figure is built, that's OK, ignore
+                      (mpl/set-figure-active unique-figure-id)
+                      (set-active-axis-handle axis)))
                    (values))
                  (lambda (unique-figure-id)
                    (delete-figure& unique-figure-id)
@@ -635,9 +646,11 @@
 (defun make-trace-name (displayname hide-in-legend)
   (cond (hide-in-legend "_")
         ((and (or (string= displayname "") (not displayname)) (not hide-in-legend))
-         (format nil "data-~A"
-                 (count-if (lambda (x) (or (pycall "isinstance" x '|matplotlib.lines.Line2D|)))
-                           (pymethod (axis-handle (gca)) "get_children"))))
+         (let ((children (pymethod (axis-handle (gca)) "get_children")))
+           (format nil "data-~A"
+                   (if (typep children 'sequence)
+                       (count-if (lambda (x) (or (pycall "isinstance" x '|matplotlib.lines.Line2D|))) children)
+                       0))))
         (displayname displayname)))
 
 (defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") markersize ax (label "") markerfacecolor linewidth
@@ -1310,23 +1323,26 @@
 (defun mpl/get-grid-size (&optional (figure *current-figure*))
   "Returns [nrows ncols}"
   (when figure
-    (or (figure-tiled-layout-request figure)
+    (if (listp (figure-tiled-layout-request figure))
+        (figure-tiled-layout-request figure)
         (loop for obj across (pyslot-value (figure-handle figure) "axes")
               for grid-spec = (pymethod obj "get_subplotspec")
               when (not (equal grid-spec "None"))
                 return (coerce (subseq (pymethod grid-spec "get_geometry") 0 2) 'list)))))
-
+  
 (defun mpl/next-subplot-grid (&optional (figure *current-figure*))
   "Returns the next subplot index (zero-based), aware of spanning subplots"
   (when (null (figure-axes figure))
     (return-from mpl/next-subplot-grid 0))
   (let ((tiledlayout (figure-tiled-layout-request figure)))
-    (loop for axis in (figure-axes figure)
-          when (equal tiledlayout (subseq (axis-subplot axis) 0 2))
-            maximizing
-            (if (numberp (third (axis-subplot axis)))
-                (third (axis-subplot axis))
-                (apply #'max (third (axis-subplot axis)))))))
+    (if (equal tiledlayout "flow")
+        (length (figure-axes figure))
+        (loop for axis in (figure-axes figure)
+              when (equal tiledlayout (subseq (axis-subplot axis) 0 2))
+                maximizing
+                (if (numberp (third (axis-subplot axis)))
+                    (third (axis-subplot axis))
+                    (apply #'max (third (axis-subplot axis))))))))
 
 (defun mpl/reflow-subplots (nrows ncols &optional (figure *current-figure*))
   (when figure
@@ -1609,13 +1625,14 @@
     (loop for i below (array-dimension image-data 0)
           do (loop for j below (array-dimension image-data 1)
                    for d = (aref image-data i j)
-                   when (> d max)
-                     do (setf max d)
-                   when (< d min)
-                     do (setf min d)))
+                   do
+                      (when (not (float-features:float-nan-p d))
+                        (when (> d max) (setf max d))
+                        (when (< d min) (setf min d)))))
+    (unless colormap (setf colormap "viridis"))
     (let* ((ax (gca))
            (axh (axis-handle ax))
-           (cmap (sampled-colormap-to-cmap colormap)))
+           (cmap (maybe-sampled-colormap-to-cmap colormap)))
       ;; should create the clipped colorbar mapping here...
       (py4cl2:pymethod axh "imshow" image-data
                        :cmap cmap :alpha (or (and use-alpha alpha-stencil) "None")
