@@ -1907,9 +1907,9 @@
   (draw-axis ax))
 
 (defun undo-last-paste ()
-  (assert *undo-last-paste*)
-  (funcall *undo-last-paste*)
-  (setf *undo-last-paste* nil))
+  (when *undo-last-paste*
+    (funcall *undo-last-paste*)
+    (setf *undo-last-paste* nil)))
 
 (defun paste-trace-to-active-figure ()
   (assert *copied-trace*)

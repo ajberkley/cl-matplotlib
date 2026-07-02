@@ -261,6 +261,7 @@ class MplDockWidget(QDockWidget):
         self.waiting_on_ginput = 0
         self.ginputs = []
         def update_active_figure (event):
+            self.clear_highlight()
             if not self.closed:
                 if (self.waiting_on_ginput > 0) and event.inaxes:
                     self.ginputs.append([event.xdata, event.ydata])
@@ -283,6 +284,8 @@ class MplDockWidget(QDockWidget):
         self.figure.set_layout_engine(matplotlib.layout_engine.ConstrainedLayoutEngine())
         self.visibilityChanged.connect(self.on_visibility_changed)
         self.selected_data = None
+        self.highlight_artist = None
+        self.highlight_time = time.time()
         self.canvas.mpl_connect('pick_event', self.on_pick)
 
     def setWindowTitle(self, title):
@@ -297,6 +300,7 @@ class MplDockWidget(QDockWidget):
             if self.selected_data:
                 global copy_callback
                 copy_callback(self.selected_data)
+                self.clear_highlight()
         # if event.key == 'ctrl+x':
         #     if self.selected_data:
         #         global cut_callback
@@ -317,6 +321,7 @@ class MplDockWidget(QDockWidget):
             set_active_figure(self.unique_figure_id, None)
 
     def mousePressEvent(self, event: QMouseEvent):
+        self.clear_highlight()
         if not self.closed:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.make_active()
@@ -361,11 +366,27 @@ class MplDockWidget(QDockWidget):
             # print(f"{self.unique_figure_id} is now visible")
             self.make_active()
 
+    def highlight_data(self, artist, x, y):
+        self.highlight_artist, = artist.axes.plot(x,y,linewidth=10,linestyle=":",color='#90d5ff',alpha=0.7,label="_highlight")
+        self.canvas.draw_idle()
+
+    def clear_highlight(self):
+        if( (time.time()-0.5) > self.highlight_time):
+            if self.highlight_artist:
+                try:
+                    self.highlight_artist.remove();
+                    self.canvas.draw_idle()
+                except Exception:
+                    pass
+    
     def on_pick(self, event):
         artist = event.artist
+        self.clear_highlight()
         label = artist.get_label()
         x_data = artist.get_xdata()
         y_data = artist.get_ydata()
+        self.highlight_data(artist, x_data, y_data)
+        self.highlight_time = time.time()
         marker = artist.get_marker()
         linestyle = artist.get_linestyle()
         linecolor = artist.get_color()
