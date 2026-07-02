@@ -37,11 +37,14 @@ legend_toggle_func = None
 # We do not let pyplot manage figure activeness, as we need thread local
 # active figures (logging can occur simultaneous to user interactive plotting,
 # headless figures can be drawn at the same time, etc).
-def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback):
-    global set_active_figure, close_window_callback, legend_toggle_func
+def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, copy_callback_in, paste_callback_in, undo_callback_in):
+    global set_active_figure, close_window_callback, legend_toggle_func, copy_callback, paste_callback, undo_callback
     set_active_figure = activate_figure_callback
     close_window_callback = close_window_func
     legend_toggle_func = legend_toggle_callback
+    copy_callback = copy_callback_in
+    paste_callback = paste_callback_in
+    undo_callback = undo_callback_in
 
 from matplotlib.backend_bases import key_press_handler
 from matplotlib.backend_tools import ToolBase, ToolToggleBase
@@ -228,6 +231,11 @@ class MegaWidget(QWidget):
         #self.parent().size()
         return QtCore.QSize(2000, 2000)
 
+copy_callback = lambda trace: None
+# cut_callback = lambda trace: None
+paste_callback = lambda: None
+undo_callback = lambda: None
+    
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None, floating=False):
         super().__init__(parent)
@@ -274,6 +282,8 @@ class MplDockWidget(QDockWidget):
         self.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.figure.set_layout_engine(matplotlib.layout_engine.ConstrainedLayoutEngine())
         self.visibilityChanged.connect(self.on_visibility_changed)
+        self.selected_data = None
+        self.canvas.mpl_connect('pick_event', self.on_pick)
 
     def setWindowTitle(self, title):
         self.title_bar_widget.title_label.setText(title)
@@ -283,6 +293,20 @@ class MplDockWidget(QDockWidget):
         # implement standard matplotlib keypress behavior
         if event.key == 'ctrl+w':
             self.close_window()
+        if event.key == 'ctrl+c':
+            if self.selected_data:
+                global copy_callback
+                copy_callback(self.selected_data)
+        # if event.key == 'ctrl+x':
+        #     if self.selected_data:
+        #         global cut_callback
+        #         cut_callback(self.selected_data)
+        if event.key == 'ctrl+v':
+            global paste_callback
+            paste_callback()  # by clicking on the right axis, liap knows which axis to paste to
+        if event.key == 'ctrl+z':
+            global undo_callback
+            undo_callback()
         key_press_handler(event, self.canvas, self.toolbar)
 
     def make_active(self):
@@ -336,6 +360,17 @@ class MplDockWidget(QDockWidget):
         if visible:
             # print(f"{self.unique_figure_id} is now visible")
             self.make_active()
+
+    def on_pick(self, event):
+        artist = event.artist
+        label = artist.get_label()
+        x_data = artist.get_xdata()
+        y_data = artist.get_ydata()
+        marker = artist.get_marker()
+        linestyle = artist.get_linestyle()
+        linecolor = artist.get_color()
+        markercolor = artist.get_markerfacecolor()
+        self.selected_data = (x_data, y_data, label, marker, linestyle, linecolor, markercolor)
 
 def important_children(window):
     child_objects = window.children()
@@ -398,9 +433,6 @@ def NewFigure (title="Hello", id=123, docked=True, tabbed=True):
             DockFigure(figure, main_window)
     return figure
 
-dock_areas = [Qt.DockWidgetArea.TopDockWidgetArea] #, Qt.DockWidgetArea.BottomDockWidgetArea, Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea]
-orientations = [Qt.Orientation.Horizontal, Qt.Orientation.Vertical]
-
 # Change figure status after the fact
 def FloatFigure (figure, parent=None):
     if FigureWindowStatus(figure) == "floating":
@@ -415,22 +447,7 @@ def DockFigure (figure, parent=None): # this could be untabify
     if parent == None:
         parent = main_window
 
-    if parent.tabifiedDockWidgets(figure.dockwidget):
-        tab_neighbor = next((d for d in parent.tabifiedDockWidgets(figure.dockwidget) if d != figure.dockwidget))
-        parent.splitDockWidget(tab_neighbor, figure.dockwidget, Qt.Orientation.Horizontal)
-    else:
-        global dock_areas
-        figure.dockwidget.setFloating(False)
-        area = dock_areas.pop(0)
-        dock_areas.append(area)
-        orientation = orientations.pop(0)
-        orientations.append(orientation)
-        visible_children = [d for d in parent.findChildren(QDockWidget) if d.isVisible() and parent.dockWidgetArea(d)==area and not parent.tabifiedDockWidgets(d)] # this way we only see one top level window, not the tabbed ones
-        figure.dockwidget.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable|QDockWidget.DockWidgetFeature.DockWidgetClosable)
-        if visible_children:
-            parent.splitDockWidget(visible_children[0], figure.dockwidget, orientation)
-        else:
-            parent.addDockWidget(area, figure.dockwidget)
+    DockWindow(figure.dockwidget, main_window)
 
     if parent.isVisible() == False:
         parent.setVisible(True)
@@ -494,6 +511,22 @@ def get_axis_used_colors (axes):
     colors_flat = [color for sublist in colors for color in sublist]
     return count_duplicates(colors_flat)
 
+def DockWindow (dockwidget, window):
+    "Dock DOCKWIDGET into MainWindow WINDOW by maybe splitting existing dockwidgets"
+    dockwidget.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable|QDockWidget.DockWidgetFeature.DockWidgetClosable)
+    visible_children = [d for d in window.findChildren(QDockWidget) if d.isVisible() and not window.tabifiedDockWidgets(d)] # this way we only see one top level window, not the tabbed ones
+    if visible_children:
+        widest_window = max(visible_children, key = lambda c: c.width())
+        tallest_window = max(visible_children, key = lambda c: c.height())
+        # print(f"widest_window {widest_window} tallest_window {tallest_window}")
+        if widest_window.width() > tallest_window.height():
+            window.splitDockWidget(widest_window, dockwidget, Qt.Orientation.Horizontal)
+        else:
+            window.splitDockWidget(tallest_window, dockwidget, Qt.Orientation.Vertical)
+    else:
+        window.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, dockwidget)
+
+
 counter = 1
 
 import matplotlib
@@ -528,17 +561,7 @@ def start_app (try_process_message):
                 parent = win.parent()
                 parent.removeDockWidget(win);
                 win.setParent(main_window);
-                global dock_areas
-                area = dock_areas.pop(0)
-                dock_areas.append(area)
-                orientation = orientations.pop(0)
-                orientations.append(orientation)
-                visible_children = [d for d in main_window.findChildren(QDockWidget) if d.isVisible() and parent.dockWidgetArea(d)==area] # this way we only see one top level window, not the tabbed ones
-                win.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable|QDockWidget.DockWidgetFeature.DockWidgetClosable)
-                if visible_children:
-                    main_window.splitDockWidget(visible_children[0], win, orientation)
-                else:
-                    main_window.addDockWidget(area, win)
+                DockWindow(win, main_window)
                 win.floating = False
                 win.is_floating = False
                 TabFigure(win.figure)

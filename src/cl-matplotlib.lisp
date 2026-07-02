@@ -293,7 +293,8 @@
 
 (defun new-figure (&key window-title
                      figure-number (layout "tabbed")
-                     (tiled-layout-request '(1 1)))
+                     (tiled-layout-request '(1 1))
+                     (set-active t))
   ;; layout can be "floating" "docked" "tabbed"
   (assert (member layout '("floating" "docked" "tabbed") :test 'string=))
   (when figure-number
@@ -317,7 +318,7 @@
                               nil)))
          (fig (register-new-figure figure-number window-title figure-handle layout
                                    tiled-layout-request)))
-    (mpl/set-figure-active fig)
+    (when set-active (mpl/set-figure-active fig))
     fig))
 
 (defun mpl/figure (identifier &key (fuzzy-match nil) (layout "tabbed"))
@@ -424,16 +425,15 @@
     (pushnew ax (figure-axes fig))
     (setf (figure-current-axis fig) ax)))
 
-(defun set-window-style/matplotlib (style)
+(defun set-window-style/matplotlib (style &optional (Figure *current-figure*))
   (assert (member style '("tabbed" "docked" "floating") :test 'string=))
-  (let ((figure *current-figure*))
-    (when figure
-      (pycall
-       (cond
-         ((string= style "tabbed") "PyQt6_cl_matplotlib.TabFigure")
-         ((string= style "floating") "PyQt6_cl_matplotlib.FloatFigure")
-         (t "PyQt6_cl_matplotlib.DockFigure"))
-       (figure-handle figure)))))
+  (when figure
+    (pycall
+     (cond
+       ((string= style "tabbed") "PyQt6_cl_matplotlib.TabFigure")
+       ((string= style "floating") "PyQt6_cl_matplotlib.FloatFigure")
+       (t "PyQt6_cl_matplotlib.DockFigure"))
+     (figure-handle figure))))
 
 (defun parse-subplot-id (subplot-id)
   (if (numberp subplot-id)
@@ -531,6 +531,9 @@
             (loop repeat 3 collect (random 10)))
   (draw-axis ax))
 
+(defparameter *copied-trace* nil)
+(defparameter *undo-last-paste* nil)
+
 (defun start-loop ()
   "Call this to start the main gui loop"
   (start-up/internal)
@@ -555,7 +558,13 @@
                                (pymethod l "set_visible"
                                          (if (eql (pymethod l "get_visible") t) nil t))
                                (draw-axis ax))
-                             (mpl/legend)))))))
+                             (mpl/legend))))))
+                 (lambda (trace-info)
+                   (setf *copied-trace* trace-info))
+                 (lambda ()
+                   (paste-trace-to-active-figure))
+                 (lambda ()
+                   (undo-last-paste)))
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
@@ -653,7 +662,8 @@
         (displayname displayname)))
 
 (defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") markersize ax (label "") markerfacecolor linewidth
-                                        markeredgecolor hide-in-legend)
+                                        markeredgecolor hide-in-legend (picker 5))
+  "Note picker copy operation does not grab error bars yet..."
   (setf ax (get-axis! ax))
   (unless color
     (setf color (find-next-color ax)))
@@ -668,7 +678,8 @@
             :label (make-trace-name label hide-in-legend)
             :color color
             :markersize (or markersize "None")
-            :linewidth (or linewidth 2))
+            :linewidth (or linewidth 2)
+            :picker picker)
   (draw-axis ax)
   ax)
 
@@ -676,18 +687,20 @@
   "May create a new figure.  Always returns a figure."
   (mpl/gcf figure-title))
 
-(defun plot-xy-data (x y &key linestyle color (marker "o") markersize label hide-in-legend (ax (gca)))
+(defun plot-xy-data (x y &key linestyle color (marker "o") markersize label hide-in-legend (ax (gca)) (picker 5))
   (when (and x y)
     (unless color
       (setf color (find-next-color ax)))
-    (pymethod (axis-handle ax) "plot" x y
-              :linestyle (or linestyle "None")
-              :color (or color "None")
-              :marker (or marker "None")
-              :markersize (or markersize "None")
-              :label (make-trace-name label hide-in-legend))
+    (let ((artist
+            (apply 'pymethod (axis-handle ax) "plot" x y
+                   :linestyle (or linestyle "None")
+                   :color (or color "None")
+                   :marker (or marker "None")
+                   :markersize (or markersize "None")
+                   :label (make-trace-name label hide-in-legend)
+                   (when picker (list :picker picker)))))
     (draw-axis ax)
-    ax))
+    (values ax artist))))
 
 (defun is-3d-axis (ax)
   (string= (pyslot-value (axis-handle ax) "name") "3d"))
@@ -1893,3 +1906,22 @@
           (setf (axis-colorbar ax) cbar))))
   (draw-axis ax))
 
+(defun undo-last-paste ()
+  (assert *undo-last-paste*)
+  (funcall *undo-last-paste*)
+  (setf *undo-last-paste* nil))
+
+(defun paste-trace-to-active-figure ()
+  (assert *copied-trace*)
+  (destructuring-bind (x y displayname marker linestyle linecolor markercolor)
+      *copied-trace*
+    (declare (ignorable markercolor))
+    (multiple-value-bind (ax artist)
+        (plot-xy-data x y :linestyle linestyle :color linecolor :marker marker :label displayname)
+      (declare (ignorable ax))
+      (print artist)
+      (setf *undo-last-paste*
+            (lambda ()
+              (pymethod (elt artist 0) "remove")
+              (draw-axis (gca)))))))
+  
