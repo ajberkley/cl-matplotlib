@@ -163,7 +163,6 @@
   (dockwidget nil) ;; a python handle to the matplotlib dockwidget object
   (axes nil :type list) ;; a list of axes
   (current-axis nil) ;; current axis of the figure (nil or an `axis')
-  (layout-info nil) ;; for automatic tiled layout and stuff
   (window-title "" :type string)
   (tiled-layout-request '(1 1)) ;; '(2 2) for example, or :flow
   (number (- (expt 2 32) 1) :type (unsigned-byte 32)) ;; unique session identifier
@@ -242,15 +241,15 @@
     (when oldfig
       (pymethod (figure-dockwidget oldfig) "setWindowTitle"
                 (figure-window-title *current-figure*))))
-  (if (typep figure/figure-number 'figure)
-      (setf *current-figure* figure/figure-number)
-      (let ((figure (get-figure figure/figure-number)))
-        (assert figure nil "Figure with name ~A does not exist" figure/figure-number)
-        (setf *current-figure* figure)))
-  (let ((newfig *current-figure*))
+  (let ((newfig (if (typep figure/figure-number 'figure)
+                        figure/figure-number
+                        (get-figure figure/figure-number))))
+    (assert newfig nil "Figure with name ~A does not exist" figure/figure-number)
+    (setf *current-figure* newfig)
     (pymethod (figure-dockwidget newfig) "setWindowTitle"
-              (concatenate 'string "*" (figure-window-title newfig) "*")))
-  *current-figure*)
+              (concatenate 'string "*" (figure-window-title newfig) "*"))
+    newfig))
+  
 
 (defun raise-figure (figure &optional (delay nil))
   "If the figure is new, we want to delay to give the gui loop a
@@ -286,7 +285,7 @@
   (assert (not (get-figure figure-number)) nil
           "Creating a new figure with same ID as existing figure")
   (let ((fig (make-figure :handle figure-handle :axes nil :current-axis current-axis
-                          :layout-info layout :window-title window-title :number figure-number
+                          :window-title window-title :number figure-number
                           :tiled-layout-request (or tiled-layout-request '(1 1))
                           :dockwidget (pyslot-value figure-handle "dockwidget"))))
     (setf (gethash figure-number *active-figures*) fig)
@@ -1893,3 +1892,4 @@
                               "colorbar" sc :ax (axis-handle ax))))
           (setf (axis-colorbar ax) cbar))))
   (draw-axis ax))
+

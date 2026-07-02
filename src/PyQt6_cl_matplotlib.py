@@ -25,7 +25,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QVBoxLayout, QWidget, QRubberBand, QLayout, QPushButton
+from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QHBoxLayout, QVBoxLayout, QWidget, QRubberBand, QLayout, QPushButton, QStyle, QFrame
 from PyQt6 import QtCore
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QMouseEvent, QCloseEvent, QKeyEvent
@@ -188,7 +188,41 @@ other_windows = []
 to_be_docked = []
 to_be_freed = []
 
+class MyNewTitleBarWidget(QWidget):
+    def __init__(self, window, dock_callback):
+        super().__init__()
+        default_height = self.style().pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight)
+        # self.setFixedHeight(default_height)
+        self.window = window
+        self.layout = QHBoxLayout()
+        self.setLayout(self.layout)
+        self.closeButton = QPushButton()
+        self.toggleButton = QPushButton()
+        self.title_label = QLabel(self)
+        self.title_label.setStyleSheet("font-size: 13px;")
+        self.layout.addWidget(self.title_label)
+        self.layout.addStretch()
+        self.layout.addWidget(self.toggleButton)
+        self.layout.addWidget(self.closeButton)
+
+        toggle_icon = self.closeButton.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton);
+        close_icon = self.closeButton.style().standardIcon(QStyle.StandardPixmap.SP_DockWidgetCloseButton);
+        self.closeButton.setIcon(close_icon)
+        self.toggleButton.setIcon(toggle_icon)
+        default_height = round(0.6*default_height)
+        self.closeButton.setFixedHeight(default_height)
+        self.toggleButton.setFixedHeight(default_height)
+        self.closeButton.setFixedWidth(default_height)
+        self.toggleButton.setFixedWidth(default_height)
+        self.closeButton.clicked.connect(self.window.close)
+        self.toggleButton.clicked.connect(dock_callback)
+
 class MegaWidget(QWidget):
+    # def __init__(self):
+    #     super().__init__()
+        # self.setFrameShape(QFrame.Shape.Box)
+        # self.setFrameShadow(QFrame.Shadow.Raised)
+
     def sizeHint(self):
         #print(f"MegaWidget parent is {self.parent()}")
         #self.parent().size()
@@ -197,23 +231,25 @@ class MegaWidget(QWidget):
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None, floating=False):
         super().__init__(parent)
+        self.title_bar_widget = MyNewTitleBarWidget(self, self.handle_click_dock)
+        self.setTitleBarWidget(self.title_bar_widget)
+        self.setWindowTitle(title)        
+        self.window_title = title
+
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.MinimumExpanding, QtWidgets.QSizePolicy.Policy.MinimumExpanding)
         # self.setMinimumHeight(200) # these do not seem necessary or effective
         # self.setMinimumWidth(200)
-        self.topLevelChanged.connect(self.handle_dock_change)
+
+        # self.topLevelChanged.connect(self.handle_dock_change)
         self.floating = floating
-        # if floating:
-        #     self.setFeatures(self.features() & ~QDockWidget.DockWidgetFeature.DockWidgetFloatable)
-        self.setWindowTitle(title)
-        layout = QVBoxLayout()
+
         self.closed = False
         self.figure = Figure()
         self.figure.dockwidget = self
         self.canvas = FigureCanvas(self.figure)
-        self.window_title = title
         self.waiting_on_ginput = 0
         self.ginputs = []
         def update_active_figure (event):
@@ -228,6 +264,7 @@ class MplDockWidget(QDockWidget):
         button = QPushButton("Legend")
         self.toolbar.addWidget(button)
         button.clicked.connect(lambda: legend_toggle_func(self.unique_figure_id))
+        layout =QVBoxLayout()
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
         self.container = MegaWidget()
@@ -237,6 +274,10 @@ class MplDockWidget(QDockWidget):
         self.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.figure.set_layout_engine(matplotlib.layout_engine.ConstrainedLayoutEngine())
         self.visibilityChanged.connect(self.on_visibility_changed)
+
+    def setWindowTitle(self, title):
+        self.title_bar_widget.title_label.setText(title)
+        super().setWindowTitle(title)
         
     def on_key_press(self, event):
         # implement standard matplotlib keypress behavior
@@ -280,14 +321,16 @@ class MplDockWidget(QDockWidget):
             self.clean_up_details()
         super().closeEvent(event)
 
-    def handle_dock_change(self, is_floating):
-        # Floating window in a MainWindow container wants
-        # to dock to the main_window.  Cannot do the work
-        # here or segfault.
-        if is_floating:
+    def handle_click_dock(self):
+        # Cannot do the work here or segfault.
+        # Here we handle floating windows docking or
+        # docking windows floating when the dock button is pressed
+        if self.floating:
             with other_windows_lock:
-                if self.floating:
-                    to_be_docked.append(self)
+                to_be_docked.append(self)
+        else:
+            with other_windows_lock:
+                to_be_freed.append(self)
 
     def on_visibility_changed(self, visible: bool):
         if visible:
@@ -303,6 +346,7 @@ def important_children(window):
 class MainWindow(QMainWindow):
     def __init__(self, title="Matplotlib workbench"):
         super().__init__()
+        self.setDockNestingEnabled(True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setWindowTitle(title)
         self.setMinimumSize(400,400)
@@ -341,41 +385,87 @@ def NewFigure (title="Hello", id=123, docked=True, tabbed=True):
         widget = MplDockWidget(title=f"{title}", parent=parent, floating=floating)
         widget.unique_figure_id = id
         figure = widget.figure
-        DockFigure(figure, parent)
+        widget.setFloating(False)
+        parent.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, widget)
+        widget.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
     else:
-        widget = MplDockWidget(title=f"{title}", parent=main_window, floating=floating)
+        widget = MplDockWidget(title=f"{title}", parent=None, floating=floating)
         widget.unique_figure_id = id
         figure = widget.figure
-        DockFigure(figure, main_window)
         if tabbed:
             TabFigure(figure)
-
-            
-    return figure
-
-def DockFigure (figure, parent):
-    figure.dockwidget.setFloating(False)
-    parent.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, figure.dockwidget)
-
-def TabFigure (figure):
-    figure.dockwidget.setFloating(False)
-    widget = figure.dockwidget
-    dock_widgets = main_window.findChildren(QDockWidget)
-    if widget in dock_widgets: dock_widgets.remove(widget)
-    # find someone who is tabified already if possible
-    already_tabbed_widget = [dock_widget for dock_widget in dock_widgets if len(main_window.tabifiedDockWidgets(dock_widget))> 0]
-    if already_tabbed_widget:
-        main_window.tabifyDockWidget(already_tabbed_widget[0], widget)
-    else:
-        if len(dock_widgets) > 0:
-            main_window.tabifyDockWidget(dock_widgets[0], widget)
         else:
             DockFigure(figure, main_window)
+    return figure
 
-def FloatFigure (figure):
+dock_areas = [Qt.DockWidgetArea.TopDockWidgetArea] #, Qt.DockWidgetArea.BottomDockWidgetArea, Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.RightDockWidgetArea]
+orientations = [Qt.Orientation.Horizontal, Qt.Orientation.Vertical]
+
+# Change figure status after the fact
+def FloatFigure (figure, parent=None):
+    if FigureWindowStatus(figure) == "floating":
+        return True
+    global to_be_freed
+    to_be_freed.append(figure.dockwidget)
+
+def DockFigure (figure, parent=None): # this could be untabify
+    if FigureWindowStatus(figure) == "docked":
+        return True
+    global main_window
+    if parent == None:
+        parent = main_window
+
+    if parent.tabifiedDockWidgets(figure.dockwidget):
+        tab_neighbor = next((d for d in parent.tabifiedDockWidgets(figure.dockwidget) if d != figure.dockwidget))
+        parent.splitDockWidget(tab_neighbor, figure.dockwidget, Qt.Orientation.Horizontal)
+    else:
+        global dock_areas
+        figure.dockwidget.setFloating(False)
+        area = dock_areas.pop(0)
+        dock_areas.append(area)
+        orientation = orientations.pop(0)
+        orientations.append(orientation)
+        visible_children = [d for d in parent.findChildren(QDockWidget) if d.isVisible() and parent.dockWidgetArea(d)==area and not parent.tabifiedDockWidgets(d)] # this way we only see one top level window, not the tabbed ones
+        figure.dockwidget.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable|QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        if visible_children:
+            parent.splitDockWidget(visible_children[0], figure.dockwidget, orientation)
+        else:
+            parent.addDockWidget(area, figure.dockwidget)
+
+    if parent.isVisible() == False:
+        parent.setVisible(True)
+
+def FigureWindowStatus (figure):
+    "Returns 'docked' 'floating' or 'tabbed'"
+    global main_window
     widget = figure.dockwidget
-    widget.setFloating(True)
+    if widget.parent() == main_window:
+        if main_window.tabifiedDockWidgets(widget):
+            return "tabbed"
+        elif widget in main_window.findChildren(QDockWidget):
+            return "docked"
+        else:
+            return "being constructed"
+    else:
+        return "floating"
     
+def TabFigure (figure):
+    if not FigureWindowStatus(figure) == "tabbed":
+        figure.dockwidget.setFloating(False)
+        figure.dockwidget.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable|QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        widget = figure.dockwidget
+        dock_widgets = main_window.findChildren(QDockWidget)
+        if widget in dock_widgets: dock_widgets.remove(widget)
+        # find someone who is tabified already if possible
+        already_tabbed_widget = [dock_widget for dock_widget in dock_widgets if main_window.tabifiedDockWidgets(dock_widget)]
+        if already_tabbed_widget:
+            main_window.tabifyDockWidget(already_tabbed_widget[0], widget)
+        else:
+            if len(dock_widgets) > 0:
+                main_window.tabifyDockWidget(dock_widgets[0], widget)
+            else:
+                DockFigure(figure, main_window)
+
 from collections import Counter
 
 def count_duplicates(items):
@@ -438,22 +528,39 @@ def start_app (try_process_message):
                 parent = win.parent()
                 parent.removeDockWidget(win);
                 win.setParent(main_window);
-                main_window.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, win);
+                global dock_areas
+                area = dock_areas.pop(0)
+                dock_areas.append(area)
+                orientation = orientations.pop(0)
+                orientations.append(orientation)
+                visible_children = [d for d in main_window.findChildren(QDockWidget) if d.isVisible() and parent.dockWidgetArea(d)==area] # this way we only see one top level window, not the tabbed ones
+                win.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable|QDockWidget.DockWidgetFeature.DockWidgetClosable)
+                if visible_children:
+                    main_window.splitDockWidget(visible_children[0], win, orientation)
+                else:
+                    main_window.addDockWidget(area, win)
                 win.floating = False
+                win.is_floating = False
                 TabFigure(win.figure)
                 win.show()
+                
+            if to_be_docked:
+                if main_window.isVisible() == False:
+                    main_window.setVisible(True)
 
             to_be_docked = []
 
             for win in to_be_freed:
                 old_parent = win.parent()
                 old_parent.removeDockWidget(win);
-                new_parent = MainWindow(old_parent.windowTitle())
+                new_parent = MainWindow(win.windowTitle())
                 new_parent.setVisible(True)
                 new_parent.show()
-                # May squishify
-                DockFigure(win.figure, new_parent) # have to make it dockable
+                new_parent.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, win)
+                win.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
                 other_windows.append(new_parent)
+                win.floating = True
+                win.is_floating = True
                 win.show()
 
             to_be_freed = []
