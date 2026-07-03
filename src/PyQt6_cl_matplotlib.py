@@ -33,18 +33,26 @@ from PyQt6.QtGui import QMouseEvent, QCloseEvent, QKeyEvent
 set_active_figure = None
 close_window_callback = None
 legend_toggle_func = None
-
+copy_callback = lambda trace: None
+# cut_callback = lambda trace: None
+paste_callback = lambda: None
+undo_callback = lambda: None
+redo_callback = lambda: None
+delete_callback = lambda: None
 # We do not let pyplot manage figure activeness, as we need thread local
 # active figures (logging can occur simultaneous to user interactive plotting,
 # headless figures can be drawn at the same time, etc).
-def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, copy_callback_in, paste_callback_in, undo_callback_in):
-    global set_active_figure, close_window_callback, legend_toggle_func, copy_callback, paste_callback, undo_callback
+def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, copy_callback_in, paste_callback_in, undo_callback_in, redo_callback_in, delete_callback_in):
+    global set_active_figure, close_window_callback, legend_toggle_func, copy_callback, paste_callback, undo_callback, redo_callback
+    global delete_callback
     set_active_figure = activate_figure_callback
     close_window_callback = close_window_func
     legend_toggle_func = legend_toggle_callback
     copy_callback = copy_callback_in
     paste_callback = paste_callback_in
     undo_callback = undo_callback_in
+    redo_callback = redo_callback_in
+    delete_callback = delete_callback_in
 
 from matplotlib.backend_bases import key_press_handler
 from matplotlib.backend_tools import ToolBase, ToolToggleBase
@@ -231,11 +239,6 @@ class MegaWidget(QWidget):
         #self.parent().size()
         return QtCore.QSize(2000, 2000)
 
-copy_callback = lambda trace: None
-# cut_callback = lambda trace: None
-paste_callback = lambda: None
-undo_callback = lambda: None
-    
 class MplDockWidget(QDockWidget):
     def __init__(self, title="Plot Dock", parent=None, floating=False):
         super().__init__(parent)
@@ -296,21 +299,24 @@ class MplDockWidget(QDockWidget):
         # implement standard matplotlib keypress behavior
         if event.key == 'ctrl+w':
             self.close_window()
-        if event.key == 'ctrl+c':
+        if event.key == 'ctrl+c' or event.key == 'ctrl+x' or event.key == 'delete':
             if self.selected_data:
                 global copy_callback
                 copy_callback(self.selected_data)
                 self.clear_highlight()
-        # if event.key == 'ctrl+x':
-        #     if self.selected_data:
-        #         global cut_callback
-        #         cut_callback(self.selected_data)
         if event.key == 'ctrl+v':
             global paste_callback
             paste_callback()  # by clicking on the right axis, liap knows which axis to paste to
         if event.key == 'ctrl+z':
             global undo_callback
             undo_callback()
+        if event.key == 'ctrl+Z':
+            global redo_callback
+            redo_callback()
+        if event.key == 'delete' or event.key == 'ctrl+x':
+            global delete_callback
+            self.clear_highlight()
+            delete_callback(self.selected_data[-1])
         key_press_handler(event, self.canvas, self.toolbar)
 
     def make_active(self):
@@ -391,7 +397,8 @@ class MplDockWidget(QDockWidget):
         linestyle = artist.get_linestyle()
         linecolor = artist.get_color()
         markercolor = artist.get_markerfacecolor()
-        self.selected_data = (x_data, y_data, label, marker, linestyle, linecolor, markercolor)
+        trace_id = artist.axes.get_children().index(artist)
+        self.selected_data = (x_data, y_data, label, marker, linestyle, linecolor, markercolor, trace_id)
 
 def important_children(window):
     child_objects = window.children()

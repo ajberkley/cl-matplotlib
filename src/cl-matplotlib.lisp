@@ -532,7 +532,10 @@
   (draw-axis ax))
 
 (defparameter *copied-trace* nil)
-(defparameter *undo-last-paste* nil)
+(defparameter *undo* nil
+  "Stores lists of two functions, first is an undo function, second is a redo function")
+(defparameter *redo* nil
+  "Stores lists of two functions, first is an undo function, second is a redo function")
 
 (defun start-loop ()
   "Call this to start the main gui loop"
@@ -564,7 +567,11 @@
                  (lambda ()
                    (paste-trace-to-active-figure))
                  (lambda ()
-                   (undo-last-paste)))
+                   (undo))
+                 (lambda ()
+                   (redo))
+                 (lambda (trace-id)
+                   (delete-trace trace-id)))
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
@@ -1906,22 +1913,50 @@
           (setf (axis-colorbar ax) cbar))))
   (draw-axis ax))
 
-(defun undo-last-paste ()
-  (when *undo-last-paste*
-    (funcall *undo-last-paste*)
-    (setf *undo-last-paste* nil)))
+(defun undo ()
+  (let ((f (pop *undo*)))
+    (when f
+      (push f *redo*)
+      (funcall (first f)))))
+
+(defun redo ()
+  (let ((f (pop *redo*)))
+    (when f
+      (push f *undo*)
+      (funcall (second f)))))
+
+(defun redraw-trace (copied-trace &optional (ax (gca)))
+  (destructuring-bind (x y displayname marker linestyle linecolor markercolor trace-id)
+      copied-trace
+    (declare (ignorable markercolor trace-id))
+    (plot-xy-data x y :linestyle linestyle :color linecolor :marker marker :label displayname
+                  :ax ax)))
 
 (defun paste-trace-to-active-figure ()
   (assert *copied-trace*)
-  (destructuring-bind (x y displayname marker linestyle linecolor markercolor)
-      *copied-trace*
-    (declare (ignorable markercolor))
-    (multiple-value-bind (ax artist)
-        (plot-xy-data x y :linestyle linestyle :color linecolor :marker marker :label displayname)
-      (declare (ignorable ax))
-      (print artist)
-      (setf *undo-last-paste*
-            (lambda ()
-              (pymethod (elt artist 0) "remove")
-              (draw-axis (gca)))))))
-  
+  (let* ((ax (gca))
+         (copied-trace *copied-trace*)
+         (artist (nth-value 1 (redraw-trace copied-trace))))
+    (push (list
+           (lambda ()
+             (pymethod (elt artist 0) "remove")
+             (draw-axis ax))
+           (lambda ()
+             (setf artist (nth-value 1 (redraw-trace copied-trace)))))
+          *undo*)))
+
+(defun delete-trace (trace-id &optional (ax (gca)))
+  "If the commands producing the figure are played back, trace-id should be
+ reliable."
+  (let ((children (pymethod (axis-handle ax) "get_children"))
+        (trace *copied-trace*)) ;; right now delete is just cut
+    (pymethod (elt children trace-id) "remove")
+    (draw-axis ax)
+    (let ((temp-artist nil))
+      (push (list (lambda ()
+                    (setf temp-artist (nth-value 1 (redraw-trace trace ax))))
+                  (lambda ()
+                    (pymethod (elt temp-artist 0) "remove")
+                    (draw-axis ax)))
+          *undo*))))
+ 
