@@ -376,8 +376,8 @@ class MplDockWidget(QDockWidget):
         self.highlight_artist, = artist.axes.plot(x,y,linewidth=10,linestyle=":",color='#90d5ff',alpha=0.7,label="_highlight")
         self.canvas.draw_idle()
 
-    def clear_highlight(self):
-        if( (time.time()-0.5) > self.highlight_time):
+    def clear_highlight(self, force=False):
+        if(force or ((time.time()-0.5) > self.highlight_time)):
             if self.highlight_artist:
                 try:
                     self.highlight_artist.remove();
@@ -387,7 +387,7 @@ class MplDockWidget(QDockWidget):
     
     def on_pick(self, event):
         artist = event.artist
-        self.clear_highlight()
+        self.clear_highlight(force=True)
         label = artist.get_label()
         x_data = artist.get_xdata()
         y_data = artist.get_ydata()
