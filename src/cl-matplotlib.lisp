@@ -746,27 +746,29 @@
   (setf ax (get-axis! ax))
   (unless color
     (setf color (find-next-color ax)))
-  (pymethod (axis-handle ax) "errorbar" x y
-            :yerr (list y- y+)
-            :xerr (list x- x+)
-            :linestyle (or linestyle "None")
-            :markeredgecolor (or markeredgecolor color "None")
-            :markerfacecolor (or markerfacecolor color "None")
-            :marker (or marker "None")
-            :capsize 3d0
-            :label (make-trace-name label hide-in-legend)
-            :color color
-            :markersize (or markersize "None")
-            :linewidth (or linewidth 2)
-            :picker picker)
-  (draw-axis ax)
-  ax)
+  (let ((errorbarcontainer
+          (pymethod (axis-handle ax) "errorbar" x y
+                    :yerr (list y- y+)
+                    :xerr (list x- x+)
+                    :linestyle (or linestyle "None")
+                    :markeredgecolor (or markeredgecolor color "None")
+                    :markerfacecolor (or markerfacecolor color "None")
+                    :marker (or marker "None")
+                    :capsize 3d0
+                    :label (make-trace-name label hide-in-legend)
+                    :color color
+                    :markersize (or markersize "None")
+                    :linewidth (or linewidth 2)
+                    :picker picker)))
+    (draw-axis ax)
+    (values ax errorbarcontainer)))
 
 (defun get-figure! (&optional figure-title)
   "May create a new figure.  Always returns a figure."
   (mpl/gcf figure-title))
 
-(defun plot-xy-data (x y &key linestyle color (marker "o") markersize label hide-in-legend (ax (gca)) (picker 5))
+(defun plot-xy-data (x y &key linestyle color (marker "o") markersize label hide-in-legend (ax (gca)) (picker 5)
+                           markerfacecolor markeredgecolor linewidth)
   (when (and x y)
     (unless color
       (setf color (find-next-color ax)))
@@ -777,7 +779,11 @@
                    :marker (or marker "None")
                    :markersize (or markersize "None")
                    :label (make-trace-name label hide-in-legend)
-                   (when picker (list :picker picker)))))
+                   (append
+                    (when picker (list :picker picker))
+                    (when linewidth (list :linewidth linewidth))
+                    (when markerfacecolor (list :markerfacecolor markerfacecolor))
+                    (when markeredgecolor (list :markeredgecolor markeredgecolor))))))
     (draw-axis ax)
     (values ax artist))))
 
@@ -2013,11 +2019,19 @@
       (funcall (second f)))))
 
 (defun redraw-trace (copied-trace &optional (ax (gca)))
-  (destructuring-bind (x y displayname marker linestyle linecolor markercolor trace-id axes-id)
+  (destructuring-bind (x y displayname marker linestyle linecolor linewidth markerfacecolor
+                       markeredgecolor errorbar-info trace-id axes-id)
       copied-trace
-    (declare (ignorable markercolor trace-id axes-id))
-    (plot-xy-data x y :linestyle linestyle :color linecolor :marker marker :label displayname
-                  :ax ax)))
+    (declare (ignorable trace-id axes-id))
+    (if errorbar-info
+        (plot-errorbar
+         x (elt errorbar-info 0) (elt errorbar-info 1)
+         y (elt errorbar-info 2) (elt errorbar-info 3)
+         :linestyle linestyle :color linecolor :marker marker :label displayname :ax ax
+         :linewidth linewidth :markerfacecolor markerfacecolor :markeredgecolor markeredgecolor)
+        (plot-xy-data
+         x y :linestyle linestyle :color linecolor :marker marker :label displayname :ax ax
+             :linewidth linewidth :markerfacecolor markerfacecolor :markeredgecolor markeredgecolor))))
 
 (defun mpl/paste-trace-to-active-figure (copied-trace)
   (assert copied-trace)
@@ -2025,7 +2039,9 @@
          (artist (nth-value 1 (redraw-trace copied-trace ax))))
     (push (list
            (lambda ()
-             (pymethod (elt artist 0) "remove")
+             (if (pycall "isinstance" artist '|matplotlib.container.ErrorbarContainer|)
+                 (pycall "PyQt6_cl_matplotlib.delete_errorbar" artist)
+                 (pymethod (elt artist 0) "remove"))
              (draw-axis ax))
            (lambda ()
              (setf artist (nth-value 1 (redraw-trace copied-trace ax)))))

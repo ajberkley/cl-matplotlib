@@ -1,19 +1,6 @@
-# BUGS:
-#  Clicking on an errorbar series in the legend hides it properly but does not
-#  modify the visibility in the legend.  This is because the legend_handles does
-#  not contain all (or even the relevant) artists in the legend.  This is a bug in
-#  matplotlib where they just store artists[0] instead of creating a container for
-#  them.  Override errorbar legend handler to return a container of artists instead
-#  of a list of artists... hopefully picking will still work.  Urgh.
-
-#  Trying to un-dock a window is OK for floating window managers, but not for Awesome,
-#  as they are not truly top level windows.  We support floating windows on creation
-#  by putting them in their own individual MainWindow.  When one clicks or drags them
-#  out of that they become docked in the main window.  We do not support freeing a window
-#  once it is docked yet (have to override the docking/freeing button in the title bar)
-#  because a drag motion may be "re-arrange windows"
 import sys
 import time
+import math
 import numpy as np
 import PyQt6
 
@@ -24,7 +11,6 @@ from matplotlib.backends.qt_compat import QtWidgets
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QHBoxLayout, QVBoxLayout, QWidget, QRubberBand, QLayout, QPushButton, QStyle, QFrame
 from PyQt6 import QtCore
 from PyQt6.QtCore import Qt, QTimer
@@ -34,7 +20,6 @@ set_active_figure = None
 close_window_callback = None
 legend_toggle_func = None
 copy_callback = lambda trace: None
-# cut_callback = lambda trace: None
 paste_callback = lambda: None
 undo_callback = lambda: None
 redo_callback = lambda: None
@@ -60,6 +45,9 @@ from matplotlib.backend_bases import key_press_handler
 from matplotlib.backend_tools import ToolBase, ToolToggleBase
 
 class DraggableLabel:
+    """ Used for axes titles and figure suptitles, only allows us to
+    drag in the x direction currently.  I could not figure out how to
+    free the y direction """
     def __init__(self, label):
         label.set_zorder(100) # stay on top
         self.label = label
@@ -91,22 +79,22 @@ class DraggableLabel:
         self.got_artist = False
 
 def enable_draggable_title(title):
+    """ Return a wrapper around the matplotlib TITLE.  User must maintain
+    a reference to this DraggableLabel otherwise it will get gc'ed """
     return DraggableLabel(title)
 
-def enable_legend_interactivity(ax, leg):
-    # Caller needs to store these, otherwise
-    # will get gc'ed because the callback references
-    # are weak!
-    return InteractiveLegend(ax, leg)
-
-import math
-
-def close_to(x0, y0, x1, y1):
+def close_to(x0, y0, x1, y1, threshold=20):
     dist = math.sqrt((x0-x1)**2 + (y0-y1)**2)
-    if dist > 20:
+    if dist > threshold:
         return False
     else:
         return True
+
+def enable_legend_interactivity(ax, leg):
+    """ Return an InteractiveLegend that wraps legend LEG.
+    The caller must store the InteractiveLegend otherwise it will
+    get gc'ed because the callback references to it are weak """
+    return InteractiveLegend(ax, leg)
 
 class InteractiveLegend(object):
     def __init__(self, axes, legend):
@@ -231,14 +219,8 @@ class MyNewTitleBarWidget(QWidget):
         self.toggleButton.clicked.connect(dock_callback)
 
 class MegaWidget(QWidget):
-    # def __init__(self):
-    #     super().__init__()
-        # self.setFrameShape(QFrame.Shape.Box)
-        # self.setFrameShadow(QFrame.Shadow.Raised)
-
+    """ An attempt to keep our windows from shrinking away to nothing, does not work well """
     def sizeHint(self):
-        #print(f"MegaWidget parent is {self.parent()}")
-        #self.parent().size()
         return QtCore.QSize(2000, 2000)
 
 class MplDockWidget(QDockWidget):
@@ -390,7 +372,37 @@ class MplDockWidget(QDockWidget):
     
     def on_pick(self, event):
         artist = event.artist
+        if not hasattr(artist, "get_xdata"): # can be other objects that get picked (titles, labels, etc)
+            return
+        errorbar_info = False
+        # Error bar containers
+        # container[0] is the normal marker/line stuff
+        # container[0].get_xdata() is the x values of the data
+        # container[0].get_ydata() is the y values of the data
+        # container[1][0].get_xdata() are x - x-
+        # container[1][1].get_xdata() are x + x+
+        # container[1][2].get_ydata() are y - y-
+        # container[1][3].get_ydata() are y + y+
+        # container[2] are the caps of the errorbars, which we could introspect for shapes, etc.
+        for container in artist.axes.containers:
+            if isinstance(container, matplotlib.container.ErrorbarContainer) and artist in container:
+                artist = container[0] # so we save the normal line stuff
+                errorbar_info = (container[0].get_xdata() - container[1][0].get_xdata().astype(float),
+                                 container[1][1].get_xdata().astype(float) - container[0].get_xdata(),
+                                 container[0].get_ydata() - container[1][2].get_ydata().astype(float),
+                                 container[1][3].get_ydata().astype(float) - container[0].get_ydata())
+        # For errorbars on_pick gets called for the data, the error bars, and the caps
+        # line, but their data is in weird format and we don't care.  We just want to trigger
+        # on the main data line.
+        if(artist.get_xdata().dtype == object or artist.get_ydata().dtype == object):
+            return None
         self.clear_highlight(force=True)
+        # axes_id and trace_id uniquely identify an artist
+        # If we click on a legend, it won't be in our axes so pass
+        if artist not in artist.axes.get_children():
+            return
+        trace_id = artist.axes.get_children().index(artist)
+        axes_id = artist.figure.get_axes().index(artist.axes)
         label = artist.get_label()
         x_data = artist.get_xdata()
         y_data = artist.get_ydata()
@@ -398,12 +410,11 @@ class MplDockWidget(QDockWidget):
         self.highlight_time = time.time()
         marker = artist.get_marker()
         linestyle = artist.get_linestyle()
+        linewidth = artist.get_linewidth()
         linecolor = artist.get_color()
-        markercolor = artist.get_markerfacecolor()
-        # axes_id and trace_id uniquely identify an artist
-        trace_id = artist.axes.get_children().index(artist)
-        axes_id = artist.figure.get_axes().index(artist.axes)
-        self.selected_data = (x_data, y_data, label, marker, linestyle, linecolor, markercolor, trace_id, axes_id)
+        markerfacecolor = artist.get_markerfacecolor()
+        markeredgecolor = artist.get_markeredgecolor()
+        self.selected_data = (x_data, y_data, label, marker, linestyle, linecolor, linewidth, markerfacecolor, markeredgecolor, errorbar_info, trace_id, axes_id)
 
 def important_children(window):
     child_objects = window.children()
@@ -560,6 +571,12 @@ def DockWindow (dockwidget, window):
     else:
         window.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, dockwidget)
 
+def delete_errorbar(errorbarContainer):
+    errorbarContainer[0].remove()
+    for cap in errorbarContainer[1]:
+        cap.remove()
+    for bar in errorbarContainer[2]:
+        bar.remove()
 
 counter = 1
 
