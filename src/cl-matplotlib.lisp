@@ -58,7 +58,6 @@
    #:mpl/map-axes
    #:mpl/set-axis-label-props
    #:mpl/set-title-props
-   #:mpl/error-messages
    #:mpl/get-grid-size
    #:mpl/reflow-subplots
    #:mpl/set-figure-tiled-layout-request
@@ -1425,12 +1424,6 @@
   (dolist (axes (figure-axes figure))
     (setf (figure-current-axis figure) axes)
     (funcall thunk)))
-
-(defun mpl/error-messages ()
-  "Sometimes matplotlib will error while trying to draw"
-  (prog1
-      (format nil "~A" py4cl2::*spurious-info*)
-    (setf (fill-pointer py4cl2::*spurious-info*) 0)))
 
 (defun mpl/get-grid-size (&optional (figure *current-figure*))
   "Returns [nrows ncols}"
