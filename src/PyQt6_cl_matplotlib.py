@@ -39,12 +39,13 @@ paste_callback = lambda: None
 undo_callback = lambda: None
 redo_callback = lambda: None
 delete_callback = lambda: None
+new_figure_func = lambda: None
 # We do not let pyplot manage figure activeness, as we need thread local
 # active figures (logging can occur simultaneous to user interactive plotting,
 # headless figures can be drawn at the same time, etc).
-def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, copy_callback_in, paste_callback_in, undo_callback_in, redo_callback_in, delete_callback_in):
+def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, copy_callback_in, paste_callback_in, undo_callback_in, redo_callback_in, delete_callback_in, new_figure_callback_in):
     global set_active_figure, close_window_callback, legend_toggle_func, copy_callback, paste_callback, undo_callback, redo_callback
-    global delete_callback
+    global delete_callback, new_figure_func
     set_active_figure = activate_figure_callback
     close_window_callback = close_window_func
     legend_toggle_func = legend_toggle_callback
@@ -53,6 +54,7 @@ def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_ca
     undo_callback = undo_callback_in
     redo_callback = redo_callback_in
     delete_callback = delete_callback_in
+    new_figure_func = new_figure_callback_in
 
 from matplotlib.backend_bases import key_press_handler
 from matplotlib.backend_tools import ToolBase, ToolToggleBase
@@ -240,7 +242,7 @@ class MegaWidget(QWidget):
         return QtCore.QSize(2000, 2000)
 
 class MplDockWidget(QDockWidget):
-    def __init__(self, title="Plot Dock", parent=None, floating=False):
+    def __init__(self, title="Plot Dock", parent=None, floating=False, size_inches=None, dpi=None):
         super().__init__(parent)
         self.title_bar_widget = MyNewTitleBarWidget(self, self.handle_click_dock)
         self.setTitleBarWidget(self.title_bar_widget)
@@ -258,7 +260,7 @@ class MplDockWidget(QDockWidget):
         self.floating = floating
 
         self.closed = False
-        self.figure = Figure()
+        self.figure = Figure(figsize=size_inches,dpi=dpi)
         self.figure.dockwidget = self
         self.canvas = FigureCanvas(self.figure)
         self.waiting_on_ginput = 0
@@ -274,7 +276,11 @@ class MplDockWidget(QDockWidget):
         self.canvas.mpl_connect('button_press_event', update_active_figure)
         self.toolbar = NavigationToolbar(self.canvas, self)
         button = QPushButton("Legend")
+        button_newfig = QPushButton("NewFig")
+        self.toolbar.addWidget(button_newfig)
         self.toolbar.addWidget(button)
+        global new_figure_func
+        button_newfig.clicked.connect(lambda: new_figure_func())
         button.clicked.connect(lambda: legend_toggle_func(self.unique_figure_id))
         layout =QVBoxLayout()
         layout.addWidget(self.toolbar)
@@ -316,15 +322,12 @@ class MplDockWidget(QDockWidget):
         if event.key == 'delete' or event.key == 'ctrl+x':
             global delete_callback
             self.clear_highlight()
-            delete_callback(self.selected_data[-1])
+            # trace_id and axis_id
+            delete_callback(self.selected_data[-2], self.selected_data[-1])
         key_press_handler(event, self.canvas, self.toolbar)
 
     def make_active(self):
-        axes = self.figure.get_axes()
-        if len(axes) > 0:
-            set_active_figure(self.unique_figure_id, self.figure.get_axes()[0])
-        else:
-            set_active_figure(self.unique_figure_id, None)
+        set_active_figure(self.unique_figure_id, None)
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clear_highlight()
@@ -397,8 +400,10 @@ class MplDockWidget(QDockWidget):
         linestyle = artist.get_linestyle()
         linecolor = artist.get_color()
         markercolor = artist.get_markerfacecolor()
+        # axes_id and trace_id uniquely identify an artist
         trace_id = artist.axes.get_children().index(artist)
-        self.selected_data = (x_data, y_data, label, marker, linestyle, linecolor, markercolor, trace_id)
+        axes_id = artist.figure.get_axes().index(artist.axes)
+        self.selected_data = (x_data, y_data, label, marker, linestyle, linecolor, markercolor, trace_id, axes_id)
 
 def important_children(window):
     child_objects = window.children()
@@ -432,7 +437,7 @@ class MainWindow(QMainWindow):
         else:
             return False
 
-def NewFigure (title="Hello", id=123, docked=True, tabbed=True):
+def NewFigure (title="Hello", id=123, docked=True, tabbed=True, size_inches=None, dpi=None):
     # Return a figure
     floating = (not docked) and (not tabbed)
     global main_window
@@ -445,7 +450,7 @@ def NewFigure (title="Hello", id=123, docked=True, tabbed=True):
         parent.setVisible(True)
         with other_windows_lock:
             other_windows.append(parent)
-        widget = MplDockWidget(title=f"{title}", parent=parent, floating=floating)
+        widget = MplDockWidget(title=f"{title}", parent=parent, floating=floating, size_inches=size_inches, dpi=dpi)
         widget.unique_figure_id = id
         figure = widget.figure
         widget.setFloating(False)
@@ -509,7 +514,8 @@ def TabFigure (figure):
             if len(dock_widgets) > 0:
                 main_window.tabifyDockWidget(dock_widgets[0], widget)
             else:
-                DockFigure(figure, main_window)
+                if not FigureWindowStatus(figure) == "docked":
+                    DockFigure(figure, main_window)
 
 from collections import Counter
 

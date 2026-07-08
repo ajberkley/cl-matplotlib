@@ -15,7 +15,6 @@
    #:new-figure
    #:figure-window-title
    #:figure-number
-   #:figure-is-open
    #:add-subplot
    #:get-figure
    #:start-loop
@@ -47,7 +46,6 @@
    #:mpl/xlim
    #:mpl/ylim
    #:mpl/zlim
-   #:get-unused-window-title
    #:mpl/set-fig-background-color
    #:mpl/set-axes-background-color
    #:mpl/find-scalar-mappable
@@ -76,7 +74,6 @@
    #:mpl/legend-visible?
    #:mpl/legend-exists?
    #:renumber-figure
-   #:set-window-title
    #:close-figure
    #:mpl/draw-arrow
    #:mpl/draw-polygon
@@ -107,7 +104,20 @@
    #:mpl/link-axis
    #:mpl/next-subplot-grid
    #:mpl/tripcolor
-   #:mpl/pcolor)
+   #:mpl/pcolor
+   #:mpl/undo
+   #:mpl/redo
+   #:*copy-callback*
+   #:*paste-callback*
+   #:*undo-callback*
+   #:*redo-callback*
+   #:*delete-callback*
+   #:mpl/paste-trace-to-active-figure
+   #:mpl/delete-trace
+   #:mpl/set-window-title
+   #:stop-headless-matplotlib
+   #:mpl/run-headless
+   #:mpl/figure-is-open)
   (:documentation "Wrapper around much of matplotlib functionality focusing on its
  use in interactive plotting and data exploration.  The focus is on drawing and
  modifying a plot so follows the 'matlab' style where one has an 'active figure' and
@@ -140,8 +150,7 @@
 
 (defparameter *loop-started* nil)
 
-(defun start-up/internal ()
-  (setf *loop-started* nil)
+(defun import-all-code ()
   (pyexec (format nil "import sys; sys.path.insert(0, '~a')"
 		  (directory-namestring
 		   (asdf:component-pathname
@@ -150,6 +159,10 @@
 		  (directory-namestring
 		   (asdf:component-pathname
 		    (asdf:find-component :cl-matplotlib "python-code"))))))
+
+(defun start-up/internal ()
+  (setf *loop-started* nil)
+  (import-all-code))
 
 ;; (defpymodule "matplotlib.widgets" nil :lisp-package "WID")
 ;; (defpymodule "matplotlib.pyplot" nil :lisp-package "PLT")
@@ -239,11 +252,16 @@
 (defun mpl/set-figure-active (figure/figure-number)
   (let ((oldfig *current-figure*))
     (when oldfig
-      (pymethod (figure-dockwidget oldfig) "setWindowTitle"
-                (figure-window-title *current-figure*))))
+       ;; Sometimes this object is partially deleted
+       ;; on the python side if it was closed.
+       (pymethod (figure-dockwidget oldfig) "setWindowTitle"
+                 (figure-window-title *current-figure*))))
+  (unless figure/figure-number
+    (setf *current-figure* nil)
+    (return-from mpl/set-figure-active nil))
   (let ((newfig (if (typep figure/figure-number 'figure)
-                        figure/figure-number
-                        (get-figure figure/figure-number))))
+                    figure/figure-number
+                    (get-figure figure/figure-number))))
     (assert newfig nil "Figure with name ~A does not exist" figure/figure-number)
     (setf *current-figure* newfig)
     (pymethod (figure-dockwidget newfig) "setWindowTitle"
@@ -261,27 +279,25 @@
                 (lambda () (pymethod dockwidget "raise_")))
         (pymethod dockwidget "raise_"))))
 
-(defvar *window-titles* '("eagle" "cow" "horse" "dog" "cat"))
+(defvar *window-titles* '("cow" "eagle" "horse" "dog" "cat" "rat"))
+(defvar *plot-counter* (list 0))
 
-(defun make-random-window-title ()
-  (format nil "~a-~a"
-          (elt *window-titles* (random (length *window-titles*)))
-          (random 10)))
-
-(defun get-unused-window-title ()
-  (loop
-    for retries below 100
-    for window-title = (make-random-window-title)
-    until (not (cl-matplotlib:find-figure-with-window-title window-title))
-    finally (return (or window-title "ran out of title names"))))
+(defun get-window-title (figure-number)
+  (format nil "~A: ~A"
+          figure-number
+          (elt *window-titles* (mod (sb-ext:atomic-incf (car *plot-counter*)) (length *window-titles*)))))
 
 (defvar *figure-counter* (list 0))
 
 (defun get-unique-figure-number ()
-  (sb-ext:atomic-incf (car *figure-counter*)))
+  (loop for fig = (sb-ext:atomic-incf (car *figure-counter*))
+        for figure-exists = (gethash fig *active-figures*)
+        while figure-exists
+        finally (return fig)))
 
 (defun register-new-figure (figure-number window-title figure-handle
                             &optional layout tiled-layout-request current-axis)
+  (declare (ignore layout))
   (assert (not (get-figure figure-number)) nil
           "Creating a new figure with same ID as existing figure")
   (let ((fig (make-figure :handle figure-handle :axes nil :current-axis current-axis
@@ -294,30 +310,42 @@
 (defun new-figure (&key window-title
                      figure-number (layout "tabbed")
                      (tiled-layout-request '(1 1))
-                     (set-active t))
+                     invisible
+                     (set-active (not invisible))
+                     size-inches
+                     dpi)
+  (declare (optimize (debug 3)))
   ;; layout can be "floating" "docked" "tabbed"
   (assert (member layout '("floating" "docked" "tabbed") :test 'string=))
   (when figure-number
     (assert (not (get-figure figure-number)) nil
             "Figure with number ~A already exists" figure-number))
-  (unless window-title
-    (setf window-title (if figure-number
-                           (format nil "~A" figure-number)
-                           (get-unused-window-title))))
   (unless figure-number (setf figure-number (get-unique-figure-number)))
+  (unless window-title
+    (setf window-title (get-window-title figure-number)))
   ;; Callbacks may happen on this figure as soon as NewFigure is called, so
   ;; make sure we have the dock
   (let* ((figure-handle
-          (pycall "PyQt6_cl_matplotlib.NewFigure" window-title figure-number
-                  :docked (if (or (string= layout "docked")
-                                  (string= layout "tabbed"))
-                              t
-                              nil)
-                  :tabbed (if (equalp layout "tabbed")
-                              t
-                              nil)))
+          (apply
+           #' pycall
+           (if invisible
+               "headless_matplotlib.NewHeadlessFigure"
+               "PyQt6_cl_matplotlib.NewFigure")
+           window-title figure-number
+           :docked (if (or (string= layout "docked")
+                           (string= layout "tabbed"))
+                       t
+                       nil)
+           :tabbed (if (equalp layout "tabbed")
+                       t
+                       nil)
+           (append
+            (when size-inches (list :size_inches size-inches))
+            (when dpi (list :dpi dpi)))))
          (fig (register-new-figure figure-number window-title figure-handle layout
                                    tiled-layout-request)))
+    ;; Disabling the set-active feature isn't that useful because
+    ;; there are callbacks from python that call this.
     (when set-active (mpl/set-figure-active fig))
     fig))
 
@@ -328,15 +356,16 @@
  try avoid having to type the full name."
   (let ((delay-raise nil))
     (labels ((new-fig (name/number)
-               (setf delay-raise t)
-               (new-figure
-                :window-title (if (stringp name/number)
+               (let ((fig-num (if (numberp name/number)
                                   name/number
-                                  (get-unused-window-title))
-                :figure-number (if (numberp name/number)
-                                   name/number
-                                   (get-unique-figure-number))
-                :layout layout)))
+                                  (get-unique-figure-number))))
+                 (setf delay-raise t)
+                 (new-figure
+                  :window-title (if (stringp name/number)
+                                    name/number
+                                    (get-window-title fig-num))
+                  :figure-number fig-num
+                  :layout layout))))
       (if identifier
           (let ((figure (or (get-figure identifier)
                             (find-figure identifier fuzzy-match)
@@ -365,13 +394,16 @@
 (defun set-figure-unique-id (figure new-unique-id)
   (setf (pyslot-value (figure-dockwidget figure) "unique_figure_id") new-unique-id))
 
-(defun set-window-title (figure window-title)
+(defun mpl/set-window-title (window-title &key (figure *current-figure*))
   (pymethod (figure-dockwidget figure) "setWindowTitle" window-title)
   (setf (figure-window-title figure) window-title))
 
 (defun close-figure (figure)
   (declare (type figure figure))
-  ;; The below will trigger a callback to delete-figure&
+  ;; The below will trigger a callback to delete-figure&, but we
+  ;; clear the current-figure anyway
+  (when (eq figure *current-figure*)
+    (setf *current-figure* nil))
   (pymethod (figure-dockwidget figure) "close_window"))
 
 (defun renumber-figure (figure-num &optional new-window-title)
@@ -395,24 +427,29 @@
     (setf (figure-number fig) figure-num)
     (setf (gethash figure-num *active-figures*) fig)
     (when new-window-title
-      (set-window-title fig new-window-title))
+      (mpl/set-window-title new-window-title :figure fig))
     figure-num))
 
 (defun register-new-axis (figure new-axis)
   (push new-axis (figure-axes figure)))
 
-(defun figure-is-open (figure-number)
-  (gethash figure-number *active-figures*))
+(defun mpl/figure-is-open (figure)
+  (gethash (figure-number figure) *active-figures*))
 
-(defun set-active-axis-handle (axis-handle)
+(defun axis-from-axis-handle (axis-handle &optional (fig *current-figure*))
+  ;; Python references are not de-duplicated on the python side, so we need
+  ;; to go back and test.
+  (find axis-handle (figure-axes fig) :key #'axis-handle :test
+        (lambda (a b)
+          (pyeval a " == " b))))
+
+(defun set-active-axis-handle (axis-handle &optional (fig *current-figure*))
   "This is a callback from python"
   ;; UGH PYTHON REFERENCES ARE NOT DE-DUPLICATED
   ;; ON THE PYTHON SIDE, WTF?
-  (let* ((fig *current-figure*))
+  (unless (equal axis-handle "None")
     (when fig
-      (let ((ax (find axis-handle (figure-axes fig) :key #'axis-handle :test
-                      (lambda (a b)
-                        (pyeval a " == " b))))) ;; slow!
+      (let ((ax (axis-from-axis-handle axis-handle fig))) ;; slow!
         ;; There may not be an axis if we have never created a plot on it,
         ;; like a button, for example...?
         (when ax
@@ -521,32 +558,70 @@
     (when (eq (figure-current-axis figure) ax)
       (setf (figure-current-axis figure) nil))))
 
-(defparameter *counter* 0)
-
-(defun draw (ax event)
-  (declare (ignorable event))
-  (incf *counter*)
-  (pymethod (axis-handle ax) "plot"
-            (loop repeat 3 collect (random 10))
-            (loop repeat 3 collect (random 10)))
-  (draw-axis ax))
-
-(defparameter *copied-trace* nil)
+(defparameter *copied-trace* nil
+  "The last trace that was copied with Ctrl-c (or ctrl-x or <delete>)")
 (defparameter *undo* nil
   "Stores lists of two functions, first is an undo function, second is a redo function")
 (defparameter *redo* nil
   "Stores lists of two functions, first is an undo function, second is a redo function")
 
+(defvar *copy-callback* (lambda (trace-info) (declare (ignorable trace-info)))
+  "a lambda (trace-info) to get called on ctrl-c, ctrl-x, <delete>.  trace-info will have been
+ stored in *copied-trace*.  User extension point.")
+
+(defvar *paste-callback* (lambda (copied-trace) (mpl/paste-trace-to-active-figure copied-trace))
+  "A lambda (trace-info) to get called on ctrl-v.  User extension point")
+
+(defvar *undo-callback* (lambda () (mpl/undo))
+  "A lambda () that will get called on ctrl-z.  User extension point")
+
+(defvar *redo-callback* (lambda () (mpl/redo))
+  "A lambda () that will get called on ctrl-shift-z.  User extension point")
+
+(defvar *delete-callback* (lambda (trace-id axes-id) (mpl/delete-trace trace-id axes-id))
+  "A lambda (trace-id) to get called on <delete>.  trace-id is the position of the
+ artist which should be deleted.  User etension point.")
+
+(defun undisplace-array-if-possible (x)
+  (if (vectorp x)
+      (multiple-value-bind (displaced-to offset)
+          (array-displacement x)
+        (if (and (zerop offset) (= (length displaced-to) (length x)))
+            displaced-to
+            x))
+      x))
+
+(defun clean-up-copied-trace! (copied-trace)
+  "py4cl2 sometimes generates (vector double-float) displaced to simple-array double-float (*) of the same
+ size.  This is silly (and triggers a now fixed bug in cl-binary-store).  Destructively modify copied-trace
+ by seeing if we can undisplace the arrays.  copied-trace is a sequence of stuff."
+  (map-into copied-trace (lambda (x)
+                           (if (vectorp x)
+                               (undisplace-array-if-possible x)
+                               x))
+            copied-trace))
+
+(defun configure-matplotlib ()
+  (pyexec "import matplotlib; import matplotlib.pyplot as plt")
+  (pyeval "plt.ion()")
+  (pyeval "matplotlib.style.use('fast')")
+  (pyexec "matplotlib.rcParams['axes.formatter.limits'] = (-2, 2)")
+  (pyexec "matplotlib.rcParams['axes.formatter.use_mathtext'] = True")
+  (pyexec (format nil "matplotlib.rcParams['savefig.directory'] = '~A'"
+                  *default-pathname-defaults*))
+  (pyexec "matplotlib.rcParams['axes.formatter.useoffset'] = False"))
+
 (defun start-loop ()
   "Call this to start the main gui loop"
   (start-up/internal)
-  (py4cl2::raw-py-exec/no-return "import PyQt6_cl_matplotlib; PyQt6_cl_matplotlib.start_app(try_process_message);")
+  (py4cl2:pyexec "import PyQt6_cl_matplotlib;")
+  (py4cl2:raw-py-exec/no-return "PyQt6_cl_matplotlib.start_app(try_process_message);")
   (py4cl2:pycall "PyQt6_cl_matplotlib.set_callbacks"
                  (lambda (unique-figure-id axis)
                    (unless (eql unique-figure-id -1)
                      (ignore-errors ;; this callback may fire before figure is built, that's OK, ignore
-                      (mpl/set-figure-active unique-figure-id)
-                      (set-active-axis-handle axis)))
+                      (let ((fig (mpl/set-figure-active unique-figure-id)))
+                        (set-active-axis-handle axis fig))))
                    (values))
                  (lambda (unique-figure-id)
                    (delete-figure& unique-figure-id)
@@ -563,26 +638,23 @@
                                (draw-axis ax))
                              (mpl/legend))))))
                  (lambda (trace-info)
-                   (setf *copied-trace* trace-info))
+                   (setf trace-info (clean-up-copied-trace! trace-info))
+                   (setf *copied-trace* trace-info)
+                   (funcall *copy-callback* trace-info))
                  (lambda ()
-                   (paste-trace-to-active-figure))
+                   (funcall *paste-callback* *copied-trace*))
                  (lambda ()
-                   (undo))
+                   (funcall *undo-callback*))
                  (lambda ()
-                   (redo))
-                 (lambda (trace-id)
-                   (delete-trace trace-id)))
+                   (funcall *redo-callback*))
+                 (lambda (trace-id axis-id)
+                   (funcall *delete-callback* trace-id axis-id))
+                 (lambda ()
+                   (mpl/figure nil)))
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
-  (pyexec "import matplotlib; import matplotlib.pyplot as plt")
-  (pyeval "plt.ion()")  ;; this is critical otherwise redrawing doesn't happen without a plt:pause call
-  (pyeval "matplotlib.style.use('fast')")
-  (pyexec "matplotlib.rcParams['axes.formatter.limits'] = (-2, 2)")
-  (pyexec "matplotlib.rcParams['axes.formatter.use_mathtext'] = True")
-  (pyexec (format nil "matplotlib.rcParams['savefig.directory'] = '~A'"
-                  *default-pathname-defaults*))
-  (pyexec "matplotlib.rcParams['axes.formatter.useoffset'] = False")
+  (configure-matplotlib)
   (setf *loop-started* t))
 
 (defun export-gaussian ()
@@ -944,13 +1016,18 @@
                             (format nil "~a.~a" filename
                                     (if eps? "eps" "png")))))
     (assert fig)
-    (let ((old-size (pymethod (figure-handle fig) "get_size_inches")))
-      (pymethod (figure-handle fig) "set_size_inches" (round width-pixels dpi) (round height-pixels dpi))
+    (let* ((old-size (pymethod (figure-handle fig) "get_size_inches"))
+           (new-width-inches (round width-pixels dpi))
+           (new-height-inches (round height-pixels dpi))
+           (is-same-size (and (= new-width-inches (elt old-size 0)) (= new-height-inches (elt old-size 1)))))
+      (unless is-same-size
+        (pymethod (figure-handle fig) "set_size_inches" new-width-inches new-height-inches))
       (pymethod (figure-handle fig) "savefig" full-filename :dpi dpi)
-      (pymethod (figure-handle fig) "set_size_inches" old-size)
+      (unless is-same-size
+        (pymethod (figure-handle fig) "set_size_inches" old-size))
       full-filename)))
 
-(defun clear-figure (&optional (figure *current-figure*))
+(defun clear-figure (&optional (figure *current-figure*) (relabel t))
   (declare (type (or null figure) figure))
   (when figure
     (pymethod (figure-handle figure) "clf")
@@ -958,7 +1035,18 @@
     (setf (figure-axes figure) nil)
     (setf (figure-tiled-layout-request figure) '(1 1))
     (setf (figure-interactive-labels figure) nil)
-    (draw-figure figure)))
+    ;; Rename / renumber the figure, if it was a logged plot we won't then overwrite it
+    (when relabel
+      (let ((figure (copy-figure figure))
+            (new-fig-id (get-unique-figure-number)))
+        (setf (figure-window-title figure) (get-window-title new-fig-id))
+        (remhash (figure-number figure) *active-figures*)
+        (setf (figure-number figure) new-fig-id)
+        (setf (gethash (figure-number figure) *active-figures*) figure)
+        (mpl/set-window-title (figure-window-title figure) :figure figure)
+        (mpl/set-figure-active figure)
+        (draw-figure figure)
+        (setf *current-figure* figure)))))
 
 (defun mpl/find-scalar-mappable (&optional (fig *current-figure*))
   (map nil (lambda (axes)
@@ -1123,9 +1211,8 @@
 (defun mpl/draw-text (x y text
                       &key horizontal-alignment (fontsize 8) (color "k") vertical-alignment
                         interpreter rotation background-color normalized-x normalized-y
-                        fontweight)
-  (let* ((ax (gca))
-         (axh (axis-handle ax)))
+                        fontweight (draw-axis t) (ax (gca)))
+  (let* ((axh (axis-handle ax)))
     (apply 'py4cl2:pymethod axh "text" x y text
            (append
             (when interpreter (list :interpreter interpreter))
@@ -1148,7 +1235,7 @@
                      (py4cl2:pycall "matplotlib.transforms.blended_transform_factory"
                                     (py4cl2:pyslot-value axh "transData")
                                     (py4cl2:pyslot-value axh "transAxes")))))))
-    (draw-axis ax)))
+    (when draw-axis (draw-axis ax))))
 
 (defun mpl/hide-legend (&key (ax (gca)))
   (let ((l (py4cl2:pymethod (axis-handle ax) "get_legend")))
@@ -1913,43 +2000,44 @@
           (setf (axis-colorbar ax) cbar))))
   (draw-axis ax))
 
-(defun undo ()
+(defun mpl/undo ()
   (let ((f (pop *undo*)))
     (when f
       (push f *redo*)
       (funcall (first f)))))
 
-(defun redo ()
+(defun mpl/redo ()
   (let ((f (pop *redo*)))
     (when f
       (push f *undo*)
       (funcall (second f)))))
 
 (defun redraw-trace (copied-trace &optional (ax (gca)))
-  (destructuring-bind (x y displayname marker linestyle linecolor markercolor trace-id)
+  (destructuring-bind (x y displayname marker linestyle linecolor markercolor trace-id axes-id)
       copied-trace
-    (declare (ignorable markercolor trace-id))
+    (declare (ignorable markercolor trace-id axes-id))
     (plot-xy-data x y :linestyle linestyle :color linecolor :marker marker :label displayname
                   :ax ax)))
 
-(defun paste-trace-to-active-figure ()
-  (assert *copied-trace*)
+(defun mpl/paste-trace-to-active-figure (copied-trace)
+  (assert copied-trace)
   (let* ((ax (gca))
-         (copied-trace *copied-trace*)
-         (artist (nth-value 1 (redraw-trace copied-trace))))
+         (artist (nth-value 1 (redraw-trace copied-trace ax))))
     (push (list
            (lambda ()
              (pymethod (elt artist 0) "remove")
              (draw-axis ax))
            (lambda ()
-             (setf artist (nth-value 1 (redraw-trace copied-trace)))))
+             (setf artist (nth-value 1 (redraw-trace copied-trace ax)))))
           *undo*)))
 
-(defun delete-trace (trace-id &optional (ax (gca)))
+(defun mpl/delete-trace (trace-id axis-id &optional (figure *current-figure*))
   "If the commands producing the figure are played back, trace-id should be
  reliable."
-  (let ((children (pymethod (axis-handle ax) "get_children"))
-        (trace *copied-trace*)) ;; right now delete is just cut
+  (let* ((axis-handle (elt (pymethod (figure-handle figure) "get_axes") axis-id))
+         (ax (axis-from-axis-handle axis-handle figure))
+         (children (pymethod axis-handle "get_children"))
+         (trace *copied-trace*)) ;; right now delete is just cut
     (pymethod (elt children trace-id) "remove")
     (draw-axis ax)
     (let ((temp-artist nil))
@@ -1959,4 +2047,28 @@
                     (pymethod (elt temp-artist 0) "remove")
                     (draw-axis ax)))
           *undo*))))
- 
+
+(defvar *headless-lock* (sb-thread:make-mutex))
+
+(defvar *headless-matplotlib* nil
+  "A python instance running a headless matplotlib, for generating thumbnails, etc.")
+
+(defun stop-headless-matplotlib ()
+  (py4cl2:pystop *headless-matplotlib*)
+  (setf *headless-matplotlib* nil))
+
+(defun mpl/run-headless (thunk)
+  (sb-thread:with-recursive-lock (*headless-lock*)
+    (unless (and *headless-matplotlib* (py4cl2:python-alive-p *headless-matplotlib*))
+      (setf *headless-matplotlib* (py4cl2:pystart (py4cl2:config-var 'py4cl2:pycmd) nil))
+      (let ((py4cl2::*python* *headless-matplotlib*))
+        (import-all-code)
+        (py4cl2:pyexec "import headless_matplotlib; import matplotlib; import PyQt6_cl_matplotlib")
+        (configure-matplotlib)
+        (py4cl2:pyeval "matplotlib.use('Agg')")))
+    (let ((py4cl2::*python* *headless-matplotlib*)
+          (*current-figure* *current-figure*)
+          (*active-figures* (make-hash-table :test 'equal)))
+      (prog1
+          (funcall thunk)
+        (py4cl2:pycall "headless_matplotlib.closeallfigs")))))
