@@ -2,6 +2,7 @@ import glob
 import math
 import os
 import sys
+from datetime import datetime
 from collections import namedtuple
 
 from PyQt6.QtCore import QAbstractListModel, Qt, QSize, QModelIndex
@@ -11,6 +12,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QListView, QStyledItemDel
 # A simple container for our image data.
 Preview = namedtuple("Preview", "id title image")
 
+FILENAME_SUFFIX = ".thumb.png"
 CELL_PADDING = 20  # Padding on all sides of each thumbnail.
 
 class PreviewDelegate(QStyledItemDelegate):
@@ -63,10 +65,12 @@ class PreviewModel(QAbstractListModel):
         return len(self.previews)
 
 class plotBrowser(QMainWindow):
-    def __init__(self, globstr, select_callback, thumb_refresh_callback):
+    def __init__(self, interactive_directory, data_directory, select_callback, thumb_refresh_callback):
         super().__init__()
-        self.globstr = globstr
-        self.setWindowTitle(f"Plot Browser: {globstr}")
+        self.data_directory = data_directory
+        self.interactive_directory = interactive_directory
+        self.globstr = self.interactive_directory + "/*" + FILENAME_SUFFIX
+        self.setWindowTitle(f"Plot Browser: {self.globstr}")
         
         # Keep basic window hints, but remove the Maximize button (~)
         self.setWindowFlags(Qt.WindowType.Window) 
@@ -104,6 +108,9 @@ class plotBrowser(QMainWindow):
         self.layout = QVBoxLayout()
         # Top row, refresh button and filename and directory selector
         self.filename = QLabel("Double click to open plot, single click to see name here")
+        self.filename.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.interactive_button = QPushButton("Today's interactive plots")
+        self.today_button = QPushButton("Today's logged plots")
         self.close_button = QPushButton("close")
         self.refresh_button = QPushButton("refresh")
         self.chdir_button = QPushButton("chdir")
@@ -115,16 +122,25 @@ class plotBrowser(QMainWindow):
         self.toprow.layout.addWidget(self.close_button, stretch=0)
         self.toprow.layout.addWidget(self.chdir_button, stretch=0)
         self.toprow.layout.addWidget(self.refresh_button, stretch=0)
+        self.toprow.layout.addWidget(self.today_button, stretch=0)
+        self.toprow.layout.addWidget(self.interactive_button, stretch=0)
         self.layout.addWidget(self.toprow, stretch=0)
         self.layout.addWidget(self.view, stretch=1)
         self.container.setLayout(self.layout)
         self.setCentralWidget(self.container)
         self.refresh()
+        self.interactive_button.clicked.connect(lambda : self.chdir(self.interactive_directory))
+        self.today_button.clicked.connect(lambda : self.chdir(self.data_directory + f"data-{datetime.today().strftime('%y-%m-%d')}/"))
         self.chdir_button.clicked.connect(self.get_dir)
         self.refresh_button.clicked.connect(self.refresh)
         self.close_button.clicked.connect(self.close)
         self.view.doubleClicked.connect(self.on_selection)
         self.view.clicked.connect(self.on_click)
+
+    def chdir(self, dir_path):
+        self.globstr = dir_path + "/*" + FILENAME_SUFFIX
+        self.setWindowTitle(f"Plot Browser: {self.globstr}")
+        self.refresh()
 
     def get_dir(self):
         dir_path = QFileDialog.getExistingDirectory(
@@ -133,15 +149,12 @@ class plotBrowser(QMainWindow):
             directory=os.path.dirname(self.globstr),
             options=QFileDialog.Option.DontUseNativeDialog,)
         if dir_path:
-            self.globstr = dir_path + "/*.thumb.png"
-            self.setWindowTitle(f"Plot Browser: {self.globstr}")
-            self.refresh()
-        
-    def refresh(self):
-        self.thumb_refresh_callback(os.path.dirname(self.globstr))
+            self.chdir(dir_path)
+
+    def rescan_thumbnails(self):
         files = glob.glob(self.globstr)
         def modified_time_of_parent_file(filename):
-            return os.path.getmtime(filename.removesuffix(".thumb.png"))
+            return os.path.getmtime(filename.removesuffix(FILENAME_SUFFIX))
         
         files.sort(key=modified_time_of_parent_file, reverse=True)
         self.model.previews = []
@@ -151,10 +164,14 @@ class plotBrowser(QMainWindow):
             self.model.previews.append(item)
 
         self.model.layoutChanged.emit()
+
+    def refresh(self):
+        self.thumb_refresh_callback(os.path.dirname(self.globstr))
+        self.rescan_thumbnails()
         
     def on_click(self, index: QModelIndex):
         filename = self.model.data(index, Qt.ItemDataRole.ToolTipRole)
-        self.filename.setText(filename)
+        self.filename.setText(filename.removesuffix(FILENAME_SUFFIX))
         
     def on_selection(self, index: QModelIndex):
         filename = self.model.data(index, Qt.ItemDataRole.ToolTipRole)        

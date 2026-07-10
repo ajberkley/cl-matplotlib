@@ -25,11 +25,12 @@ undo_callback = lambda: None
 redo_callback = lambda: None
 delete_callback = lambda: None
 new_figure_func = lambda: None
+toggle_title_vis_callback = lambda: None
 # We do not let pyplot manage figure activeness, as we need thread local
 # active figures (logging can occur simultaneous to user interactive plotting,
 # headless figures can be drawn at the same time, etc).
-def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, copy_callback_in, paste_callback_in, undo_callback_in, redo_callback_in, delete_callback_in, new_figure_callback_in):
-    global set_active_figure, close_window_callback, legend_toggle_func, copy_callback, paste_callback, undo_callback, redo_callback
+def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, copy_callback_in, paste_callback_in, undo_callback_in, redo_callback_in, delete_callback_in, new_figure_callback_in, toggle_title_vis_callback_in):
+    global set_active_figure, close_window_callback, legend_toggle_func, copy_callback, paste_callback, undo_callback, redo_callback, toggle_title_vis_callback
     global delete_callback, new_figure_func
     set_active_figure = activate_figure_callback
     close_window_callback = close_window_func
@@ -40,6 +41,7 @@ def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_ca
     redo_callback = redo_callback_in
     delete_callback = delete_callback_in
     new_figure_func = new_figure_callback_in
+    toggle_title_vis_callback = toggle_title_vis_callback_in
 
 from matplotlib.backend_bases import key_press_handler
 from matplotlib.backend_tools import ToolBase, ToolToggleBase
@@ -69,9 +71,13 @@ class DraggableLabel:
 
     def on_move(self, event):
         if self.got_artist:
+            # equivalent to having put y = 1.0 on creation
+            # This is terrible, but set_in_layout(False) does not work
+            self.label.axes._autotitlepos = False
+            self.label.axes._set_title_offset_trans(1.0)
             inv_axes_transform = self.label.axes.transAxes.inverted()
             axes_local_x, axes_local_y = inv_axes_transform.transform((event.x, event.y))
-            self.label.set_in_layout(False)
+            self.label.set_in_layout(False) # this doesn't work 
             self.label.set_position((axes_local_x, axes_local_y))
             self.canvas.draw_idle()
 
@@ -259,9 +265,12 @@ class MplDockWidget(QDockWidget):
         self.toolbar = NavigationToolbar(self.canvas, self)
         button = QPushButton("Legend")
         button_newfig = QPushButton("NewFig")
+        button_titlevis = QPushButton("Title")
+        self.toolbar.addWidget(button_titlevis)
         self.toolbar.addWidget(button_newfig)
         self.toolbar.addWidget(button)
         global new_figure_func
+        button_titlevis.clicked.connect(lambda: toggle_title_vis_callback())
         button_newfig.clicked.connect(lambda: new_figure_func())
         button.clicked.connect(lambda: legend_toggle_func(self.unique_figure_id))
         layout =QVBoxLayout()
@@ -515,7 +524,8 @@ def TabFigure (figure):
         figure.dockwidget.setFloating(False)
         figure.dockwidget.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable|QDockWidget.DockWidgetFeature.DockWidgetClosable)
         widget = figure.dockwidget
-        dock_widgets = main_window.findChildren(QDockWidget)
+        # it is possible for a window to be closing, we do not want to be tabbed with it (call) (figure) triggers this
+        dock_widgets = [dock_widget for dock_widget in main_window.findChildren(QDockWidget) if not dock_widget.closed]
         if widget in dock_widgets: dock_widgets.remove(widget)
         # find someone who is tabified already if possible
         already_tabbed_widget = [dock_widget for dock_widget in dock_widgets if main_window.tabifiedDockWidgets(dock_widget)]

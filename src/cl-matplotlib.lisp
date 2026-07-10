@@ -116,7 +116,12 @@
    #:mpl/set-window-title
    #:stop-headless-matplotlib
    #:mpl/run-headless
-   #:mpl/figure-is-open)
+   #:mpl/figure-is-open
+   #:mpl/get-xlim
+   #:mpl/get-ylim
+   #:mpl/get-zlim
+   #:*invisible-figure*
+   #:mpl/toggle-title-visibility)
   (:documentation "Wrapper around much of matplotlib functionality focusing on its
  use in interactive plotting and data exploration.  The focus is on drawing and
  modifying a plot so follows the 'matlab' style where one has an 'active figure' and
@@ -253,8 +258,9 @@
     (when oldfig
        ;; Sometimes this object is partially deleted
        ;; on the python side if it was closed.
-       (pymethod (figure-dockwidget oldfig) "setWindowTitle"
-                 (figure-window-title *current-figure*))))
+       (ignore-errors
+        (pymethod (figure-dockwidget oldfig) "setWindowTitle"
+                 (figure-window-title *current-figure*)))))
   (unless figure/figure-number
     (setf *current-figure* nil)
     (return-from mpl/set-figure-active nil))
@@ -306,10 +312,12 @@
     (setf (gethash figure-number *active-figures*) fig)
     fig))
 
+(defvar *invisible-figure* nil)
+
 (defun new-figure (&key window-title
                      figure-number (layout "tabbed")
                      (tiled-layout-request '(1 1))
-                     invisible
+                     (invisible *invisible-figure*)
                      (set-active (not invisible))
                      size-inches
                      dpi)
@@ -326,7 +334,7 @@
   ;; make sure we have the dock
   (let* ((figure-handle
           (apply
-           #' pycall
+           #'pycall
            (if invisible
                "headless_matplotlib.NewHeadlessFigure"
                "PyQt6_cl_matplotlib.NewFigure")
@@ -649,7 +657,9 @@
                  (lambda (trace-id axis-id)
                    (funcall *delete-callback* trace-id axis-id))
                  (lambda ()
-                   (mpl/figure nil)))
+                   (mpl/figure nil))
+                 (lambda ()
+                   (mpl/toggle-title-visibility)))
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
@@ -704,6 +714,7 @@
       ((is "y" "yellow") '(1.0 1.0 0.0))
       ((is "k" "black") '(0.0 0.0 0.0))
       ((is "w" "white") '(1.0 1.0 1.0))
+      ((is "gr" "gray") '(0.7 0.7 0.7))
       (t (error "Unknown color ~A" color)))))
 
 (defvar *color-set* #((0d0 0d0 1d0) (1d0 0d0 0d0) (0d0 1d0 0d0) (0d0 0d0 0d0) (1d0 0d0 1d0) (0d0 1d0 1d0) (0d0 1d0 0d0)))
@@ -866,6 +877,15 @@
                 (:replace string))))
     (draw-axis ax))
 
+(defun mpl/toggle-title-visibility (&key (ax (gca)))
+  "Appends string to title if specified with action :append or replaces it
+ if :replace.  Keeps fontsize, fontweight, color.  To build a new title call
+ mpl/title.  To change fonts try mpl/set-title-props."
+  (let ((title (pyslot-value (axis-handle ax) "title")))
+    (when (and title (not (equal title "None")))
+      (pymethod title "set_visible" (not (pymethod title "get_visible")))
+      (draw-axis ax))))
+
 (defun mpl/title (string &key (ax (gca)) (draw t) fontsize fontweight color)
   "Text in $ $ will be interpreted as LaTex. Don't forget \\, like
  (title 'My happy e$\\chi$periment')"
@@ -900,6 +920,18 @@
   (assert ax nil "No current axis")
   (pymethod (axis-handle ax) "set_zlim" (coerce z0 'double-float) (coerce z1 'double-float))
   (when draw (draw-axis ax)))
+
+(defun mpl/get-xlim (&key (ax (gca)))
+  "Return a list (min max) for the visible range of the x-axis"
+  (pymethod (axis-handle ax) "get_xlim"))
+
+(defun mpl/get-ylim (&key (ax (gca)))
+  "Return a list (min max) for the visible range of the y-axis"
+  (pymethod (axis-handle ax) "get_ylim"))
+
+(defun mpl/get-zlim (&key (ax (gca)))
+  "Return a list (min max) for the visible range of the z-axis"
+  (pymethod (axis-handle ax) "get_zlim"))
 
 (defun sampled-colormap-to-cmap (sampled-colormap)
   (pycall "matplotlib.colors.ListedColormap" sampled-colormap))
@@ -1566,13 +1598,8 @@
          (func-name (if rectilinear
                         (if filled "contourf" "contour")
                         (if filled "tricontourf" "tricontour"))))
-    (if (and rectilinear
-               (not (and (arrayp x) (arrayp y)
-                         (= (array-rank x) 2) (= (array-rank y) 2))))
-        (multiple-value-bind (xgrid ygrid)
-            (meshgrid x y)
-          (setf x xgrid y ygrid))
-        (setf x (to-sadf x) y (to-sadf y) z (to-sadf z)))
+    (when rectilinear
+      (setf x (to-sadf x) y (to-sadf y)))
     (let ((cs
             (apply 'pymethod (axis-handle ax) func-name
                    x y z
@@ -1590,27 +1617,31 @@
       (draw-axis ax)
       cs)))
 
-(defun mpl/draw-arrow (initial-pt final-pt &key arrow-type string color linestyle textcolor)
+(defun mpl/draw-arrow (initial-pt final-pt &key arrow-type string color linestyle textcolor textrotation (draggable t))
   "arrow-type: - <- -> <-> <|- -|> <|-|> ]- -[ ]-[ |-| ]-> <-[ simple fancy wedge"
-  (let ((ax (gca)))
-    (pymethod (axis-handle ax) "annotate" (or string "")
-              :xy initial-pt
-              :xycoords "data"
-              :xytext final-pt
-              :textcoords "data"
-              :color (or textcolor "k")
-              :arrowprops
-              (pycall "dict" 
-                      :arrowstyle
-                      (if (stringp arrow-type)
-                          arrow-type
-                          (case arrow-type
-                            (:arrow "->")
-                            (:doublearrow "<->")
-                            (otherwise "->")))
-                      :facecolor (or color "k")
-                      :linestyle (or linestyle "-")))
-    (draw-axis ax)))
+  (let* ((ax (gca))
+         (arrow
+           (pymethod (axis-handle ax) "annotate" (or string "")
+                     :xy initial-pt
+                     :xycoords "data"
+                     :xytext final-pt
+                     :textcoords "data"
+                     :color (or textcolor "k")
+                     :rotation (or textrotation 0)
+                     :arrowprops
+                     (pycall "dict"
+                             :arrowstyle
+                             (if (stringp arrow-type)
+                                 arrow-type
+                                 (case arrow-type
+                                   (:arrow "->")
+                                   (:doublearrow "<->")
+                                   (otherwise "->")))
+                             :facecolor (or color "k")
+                             :linestyle (or linestyle "-")))))
+    (when draggable (pymethod arrow "draggable"))
+    (draw-axis ax)
+    (values ax arrow)))
 
 (defun mpl/draw-polygon (vertices &key (closed t) facecolor edgecolor linewidth alpha displayname)
   "Polygons go behind data points so facecolor will not obscure them"
@@ -2079,5 +2110,6 @@
           (*current-figure* *current-figure*)
           (*active-figures* (make-hash-table :test 'equal)))
       (prog1
-          (funcall thunk)
+          (let ((*invisible-figure* t))
+            (funcall thunk))
         (py4cl2:pycall "headless_matplotlib.closeallfigs")))))
