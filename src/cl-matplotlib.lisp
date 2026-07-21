@@ -479,6 +479,14 @@
        (t "PyQt6_cl_matplotlib.DockFigure"))
      (figure-handle figure))))
 
+(defun matlab-marker-to-matplotlib-marker (marker)
+  (cond
+    ((equalp marker "diamond") "D") ;; regular diamond, "d" is thin diamond
+    ((equalp marker "square") "s")
+    ((equalp marker "hexagram") "h")
+    ((equalp marker "pentagram") "p")
+    (t marker)))
+
 (defun parse-subplot-id (subplot-id)
   (if (numberp subplot-id)
       (let* ((hundreds (floor subplot-id 100))
@@ -711,13 +719,15 @@
       ((is "b" "blue") '(0.0 0.0 1.0))
       ((is "c" "cyan") '(0.0 1.0 1.0))
       ((is "m" "magenta") '(1.0 0.0 1.0))
-      ((is "y" "yellow") '(1.0 1.0 0.0))
+      ((is "y" "yellow") '(1.0d0 0.72d0 0.035d0)) ;; amber
       ((is "k" "black") '(0.0 0.0 0.0))
       ((is "w" "white") '(1.0 1.0 1.0))
       ((is "gr" "gray") '(0.7 0.7 0.7))
       (t (error "Unknown color ~A" color)))))
 
-(defvar *color-set* #((0d0 0d0 1d0) (1d0 0d0 0d0) (0d0 1d0 0d0) (0d0 0d0 0d0) (1d0 0d0 1d0) (0d0 1d0 1d0) (0d0 1d0 0d0)))
+;; Default color order is blue, red, green, black, pink, cyan, amber (yellow).  We don't use exactly black because
+;; our way of counting colors includes the figure lines which count as strictly black
+(defvar *color-set* #((0d0 0d0 1d0) (1d0 0d0 0d0) (0d0 1d0 0d0) (0.001d0 0.001d0 0.001d0) (1d0 0d0 1d0) (0d0 1d0 1d0) (1.0d0 0.72d0 0.035d0)))
 
 (defun find-next-color (axis)
   "Only works if user sticks with the primary colors in *color-set*."
@@ -729,11 +739,12 @@
          (get-used-colors axis))
     (let ((best-color nil)
           (minimum-used most-positive-fixnum))
-      (maphash (lambda (color count)
-                 (when (< count minimum-used)
-                   (setf minimum-used count)
-                   (setf best-color color)))
-               used-colors)
+      (map nil (lambda (color)
+                 (let ((count (gethash color used-colors)))
+                   (when (< count minimum-used)
+                     (setf minimum-used count)
+                     (setf best-color color))))
+           *color-set*)
       best-color)))
 
 (defun get-axis! (&optional (ax (gca)) figure-title)
@@ -763,7 +774,7 @@
                     :linestyle (or linestyle "None")
                     :markeredgecolor (or markeredgecolor color "None")
                     :markerfacecolor (or markerfacecolor color "None")
-                    :marker (or marker "None")
+                    :marker (or (matlab-marker-to-matplotlib-marker marker) "None")
                     :capsize 3d0
                     :label (make-trace-name label hide-in-legend)
                     :color color
@@ -786,7 +797,7 @@
             (apply 'pymethod (axis-handle ax) "plot" x y
                    :linestyle (or linestyle "None")
                    :color (or color "None")
-                   :marker (or marker "None")
+                   :marker (or (matlab-marker-to-matplotlib-marker marker) "None")
                    :markersize (or markersize "None")
                    :label (make-trace-name label hide-in-legend)
                    (append
@@ -819,7 +830,7 @@
                :c (or color "b")
                (append (when linestyle (list :linestyle linestyle))
                        (when linewidth (list :linewidth linewidth)))))
-      (apply 'pymethod (axis-handle ax) "scatter" x y z :marker marker
+      (apply 'pymethod (axis-handle ax) "scatter" x y z :marker (matlab-marker-to-matplotlib-marker marker)
              (append
               (list :c (or color "b"))
               (when facecolor (list :facecolor facecolor))
@@ -1249,10 +1260,11 @@
                       &key horizontal-alignment (fontsize 8) (color "k") vertical-alignment
                         interpreter rotation background-color normalized-x normalized-y
                         fontweight (draw-axis t) (ax (gca)))
+  (declare (ignorable interpreter))
   (let* ((axh (axis-handle ax)))
     (apply 'py4cl2:pymethod axh "text" x y text
            (append
-            (when interpreter (list :interpreter interpreter))
+            ;;(when interpreter (list :interpreter interpreter))
             (when rotation (list :rotation rotation))
             (when background-color (list :backgroundcolor background-color))
             (when color (list :color color))
@@ -1531,7 +1543,7 @@
            :color color
            (append
             (when linestyle (list :linestyle linestyle))
-            (when marker (list :marker marker))
+            (when marker (list :marker (matlab-marker-to-matplotlib-marker marker)))
             (when displayname (list :label displayname))
             (when linewidth (list :linewidth linewidth))))
     (draw-axis ax)
@@ -1873,7 +1885,8 @@
   (maybe-remove-axis-colorbar ax)
   (let ((sc (apply 'pymethod
                    (axis-handle ax) "scatter" x y
-                   :c z :cmap cmap :marker (or marker "o") :s (or markersize/s 16)
+                   :c z :cmap cmap :marker (or (matlab-marker-to-matplotlib-marker marker) "o")
+                   :s (or markersize/s 16)
                    (append
                     (when cmin (list :vmin cmin))
                     (when cmax (list :vmax cmax))))))
