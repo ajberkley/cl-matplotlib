@@ -1,5 +1,6 @@
 (defpackage :cl-matplotlib
   (:use :common-lisp :py4cl2)
+  (:import-from #:alexandria #:define-constant #:copy-array)
   (:export
    #:demo
    #:plot-xy-data
@@ -121,7 +122,9 @@
    #:mpl/get-ylim
    #:mpl/get-zlim
    #:*invisible-figure*
-   #:mpl/toggle-title-visibility)
+   #:mpl/toggle-title-visibility
+   #:mpl/show-marker-types
+   #:mpl/show-linestyle-types)
   (:documentation "Wrapper around much of matplotlib functionality focusing on its
  use in interactive plotting and data exploration.  The focus is on drawing and
  modifying a plot so follows the 'matlab' style where one has an 'active figure' and
@@ -479,13 +482,99 @@
        (t "PyQt6_cl_matplotlib.DockFigure"))
      (figure-handle figure))))
 
+(alexandria:define-constant +single-character-markers+
+  #(#\. #\, #\o #\v #\^ #\< #\> #\1 #\2 #\3 #\4 #\8 #\s #\p #\P #\* #\h #\H
+    #\+ #\x #\X #\D #\d #\| #\_ #\Space) :test 'equalp)
+
+(defun validate-marker (marker)
+  "marker is valid or raises an error"
+  (etypecase marker
+    ((string 0))
+    ((string 1) (assert (find (aref marker 0) +single-character-markers+)))
+    ((integer 0 11))
+    (string
+     (assert (or (equal marker "none")
+                 (equal marker "None")
+                 (and (> (length marker) 1)
+                      (eq #\$ (elt marker 0))
+                      (eq #\$ (elt marker (- (length marker) 1)))))))
+    (list (assert (or
+                   (and (= (length marker) 3)
+                        (integerp (elt marker 0))
+                        (<= 0 (elt marker 1) 2)
+                        (numberp (elt marker 2)))
+                   (every (lambda (x) (and (typep x 'sequence) (every #'numberp x))) marker)))))) ;; list of verts
+
 (defun matlab-marker-to-matplotlib-marker (marker)
-  (cond
-    ((equalp marker "diamond") "D") ;; regular diamond, "d" is thin diamond
-    ((equalp marker "square") "s")
-    ((equalp marker "hexagram") "h")
-    ((equalp marker "pentagram") "p")
-    (t marker)))
+  "convert some special matlab marker strings to appropriate matplotlib and validate the marker input"
+  (when marker
+    (cond
+      ((equalp marker "diamond") "D") ;; regular diamond, "d" is thin diamond
+      ((equalp marker "square") "s")
+      ((equalp marker "hexagram") "h")
+      ((equalp marker "pentagram") "p")
+      (t (validate-marker marker) marker))))
+
+(defun mpl/show-marker-types ()
+  (mpl/figure "marker")
+  (clear-figure)
+  (let* ((counter 50)
+         (N 6)
+         (x (loop for i from 0 below N collect i)))
+    (labels ((pl (mark-string &optional (label (format nil "~S" mark-string)))
+               (plot-xy-data x (make-list N :initial-element counter)
+                             :marker mark-string :label label :linestyle "")
+               (decf counter)))
+      (loop for marker across +single-character-markers+
+            for mark-string = (make-string 1 :initial-element marker)
+            do (pl mark-string))
+      (loop for mark-string from 0 below 12
+            do (pl mark-string))
+      (pl "none")
+      (pl "$a$" "\"\\$a\\$\"")
+      (pl "$b$" "\"\\$b\\$\"")
+      (pl "None")
+      (pl '(4 0 45) "(4 0 45)")
+      (pl '(4 0 0) "(4 0 0)")
+      (pl '(4 1 0) "(4 1 0)")
+      (pl '(4 2 0) "(4 2 0)")
+      (pl '(3 0 0) "(3 0 0)")
+      (pl "")
+      (pl '((0 0) (1 1) (1 0)) "((0 0) (1 1) (1 0))")
+      (mpl/xlim -0.5 (+ N 2))
+      (mpl/legend :ncol 2 :location "upper right"))))
+
+(defun mpl/show-linestyle-types ()
+  (mpl/figure "linestyles")
+  (clear-figure)
+  (let* ((counter 50)
+         (N 6)
+         (x (loop for i from 0 below N collect i)))
+    (labels ((pl (linestyle &optional gapcolor)
+               (plot-xy-data x (make-list N :initial-element counter)
+                             :label (format nil ":linestyle ~S~@[ :gapcolor ~S~]" linestyle gapcolor)
+                             :linestyle linestyle
+                             :gapcolor gapcolor)
+               (decf counter)))
+      (pl "-")
+      (pl "--")
+      (pl "-.")
+      (pl ":")
+      (pl "none")
+      (pl '(0 (2 1)))
+      (pl '(0 (2 1)) "green")
+      (pl '(0 (10 5 1 5)))
+      (pl '(0 (10 5 1 5)) "blue")
+      (mpl/xlim -0.5 8.75)
+      (mpl/legend))))
+
+(defun validate-linestyle (linestyle)
+  (when linestyle
+    (etypecase linestyle
+      (string (assert (member linestyle '("-" "--" "-." ":" "none") :test 'equal)))
+      (list (assert (and (= (length linestyle) 2) (numberp (first linestyle))
+                         (typep (second linestyle) 'sequence)
+                         (every #'numberp (second linestyle))))))))
 
 (defun parse-subplot-id (subplot-id)
   (if (numberp subplot-id)
@@ -762,8 +851,9 @@
         (displayname displayname)))
 
 (defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") markersize ax (label "") markerfacecolor linewidth
-                                        markeredgecolor hide-in-legend (picker 5))
+                                        markeredgecolor hide-in-legend (picker 5) ecolor gapcolor)
   "Note picker copy operation does not grab error bars yet..."
+  (validate-linestyle linestyle)
   (setf ax (get-axis! ax))
   (unless color
     (setf color (find-next-color ax)))
@@ -780,7 +870,9 @@
                     :color color
                     :markersize (or markersize "None")
                     :linewidth (or linewidth 2)
-                    :picker picker)))
+                    :picker picker
+                    :ecolor (or ecolor color)
+                    :gapcolor (or gapcolor "None"))))
     (draw-axis ax)
     (values ax errorbarcontainer)))
 
@@ -789,8 +881,9 @@
   (mpl/gcf figure-title))
 
 (defun plot-xy-data (x y &key linestyle color (marker "o") markersize label hide-in-legend (ax (gca)) (picker 5)
-                           markerfacecolor markeredgecolor linewidth)
+                           markerfacecolor markeredgecolor linewidth gapcolor)
   (when (and x y)
+    (validate-linestyle linestyle)
     (unless color
       (setf color (find-next-color ax)))
     (let ((artist
@@ -801,6 +894,7 @@
                    :markersize (or markersize "None")
                    :label (make-trace-name label hide-in-legend)
                    (append
+                    (when gapcolor (list :gapcolor gapcolor))
                     (when picker (list :picker picker))
                     (when linewidth (list :linewidth linewidth))
                     (when markerfacecolor (list :markerfacecolor markerfacecolor))
@@ -822,6 +916,7 @@
 
 (defun scatter-3d (x y z &key linestyle color (marker "o") ax markersize colormap facecolor markerfacecolor displayname linewidth hide-in-legend markeredgecolor)
   (when (and x y z)
+    (validate-linestyle linestyle)
     (pyexec "import matplotlib")
     (pyexec "from mpl_toolkits.mplot3d import Axes3D")
     (let* ((ax (ensure-3d-axis (or ax (gca)))))
@@ -1087,6 +1182,7 @@
     (when relabel
       (let ((figure (copy-figure figure))
             (new-fig-id (get-unique-figure-number)))
+        (setf (pyslot-value (figure-dockwidget figure) "unique_figure_id") new-fig-id)
         (setf (figure-window-title figure) (get-window-title new-fig-id))
         (remhash (figure-number figure) *active-figures*)
         (setf (figure-number figure) new-fig-id)
@@ -1174,6 +1270,7 @@
                                    (label-y-fraction 0.5))
   "orientation may be 'vertical' or 'horizontal'.  horizontal-alignment may be
  'left' 'center' 'right' , vertical-alignment may be 'center' 'top' 'bottom'"
+  (validate-linestyle linestyle)
   (py4cl2:pymethod (axis-handle ax) "axvline" x :color line-colour :linewidth linewidth
                                                 :linestyle linestyle
                                                 :label (if (or (not displayname) omit-from-legend)
@@ -1200,6 +1297,7 @@
                                      (label-x-fraction 0.5))
   "orientation may be 'vertical' or 'horizontal'.  horizontal-alignment may be
  'left' 'center' 'right' , vertical-alignment may be 'center' 'top' 'bottom'"
+  (validate-linestyle linestyle)
   (py4cl2:pymethod (axis-handle ax) "axhline" y
                    :color line-colour :linewidth linewidth
                    :linestyle linestyle
@@ -1528,6 +1626,7 @@
 
 (defun mpl/plot-universal-time-series (data &key color marker linewidth linestyle displayname)
   "data is a list of universal-time (seconds) and numbers."
+  (validate-linestyle linestyle)
   (let ((x (map '(simple-array (unsigned-byte 64) (*)) (lambda (x) (- ;; universal to unix time
                                                                     (round (* (first x) 1000))
                                                                     2208988800000))
@@ -1631,6 +1730,7 @@
 
 (defun mpl/draw-arrow (initial-pt final-pt &key arrow-type string color linestyle textcolor textrotation (draggable t))
   "arrow-type: - <- -> <-> <|- -|> <|-|> ]- -[ ]-[ |-| ]-> <-[ simple fancy wedge"
+  (validate-linestyle linestyle)
   (let* ((ax (gca))
          (arrow
            (pymethod (axis-handle ax) "annotate" (or string "")
@@ -2009,6 +2109,8 @@
 (defun mpl/tripcolor (triangles x y z &key (ax (gca)) (colormap "viridis") (show-colorbar t)
                                         zmin zmax)
   (maybe-remove-axis-colorbar ax)
+  (unless (typep triangles '(simple-array (unsigned-byte 32) (* 3)))
+    (setf triangles (alexandria:copy-array triangles :element-type '(unsigned-byte 32))))
   (let* ((sc (apply 'pymethod
                     (axis-handle ax) "tripcolor" x y z
                     :triangles triangles

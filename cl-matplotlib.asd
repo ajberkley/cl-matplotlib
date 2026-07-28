@@ -4,7 +4,7 @@
   :author "Andrew J. Berkley <ajberkley@gmail.com>"
   :long-name "Interactive matlab like plotting experience using python+matplotlib"
   :pathname "src/"
-  :depends-on (#:py4cl2 #:mk-string-metrics #:float-features)
+  :depends-on (#:py4cl2 #:mk-string-metrics #:float-features #:alexandria)
   :components ((:static-file "python-code" :pathname #P"py4cl-modified.py")
                (:file "cl-matplotlib"))
   :license :BSD-3

@@ -230,13 +230,13 @@ class MegaWidget(QWidget):
         return QtCore.QSize(2000, 2000)
 
 class MplDockWidget(QDockWidget):
-    def __init__(self, title="Plot Dock", parent=None, floating=False, size_inches=None, dpi=None):
+    def __init__(self, title="Plot Dock", parent=None, floating=False, size_inches=None, dpi=None, id=None):
         super().__init__(parent)
         self.title_bar_widget = MyNewTitleBarWidget(self, self.handle_click_dock)
         self.setTitleBarWidget(self.title_bar_widget)
         self.setWindowTitle(title)        
         self.window_title = title
-
+        self.unique_figure_id = id
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
@@ -470,15 +470,13 @@ def NewFigure (title="Hello", id=123, docked=True, tabbed=True, size_inches=None
         parent.setVisible(True)
         with other_windows_lock:
             other_windows.append(parent)
-        widget = MplDockWidget(title=f"{title}", parent=parent, floating=floating, size_inches=size_inches, dpi=dpi)
-        widget.unique_figure_id = id
+        widget = MplDockWidget(title=f"{title}", parent=parent, floating=floating, size_inches=size_inches, dpi=dpi, id=id)
         figure = widget.figure
         widget.setFloating(False)
         parent.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, widget)
         widget.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
     else:
-        widget = MplDockWidget(title=f"{title}", parent=None, floating=floating)
-        widget.unique_figure_id = id
+        widget = MplDockWidget(title=f"{title}", parent=None, floating=floating, id=id)
         figure = widget.figure
         if tabbed:
             TabFigure(figure)
