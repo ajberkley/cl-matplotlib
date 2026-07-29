@@ -1146,7 +1146,7 @@
       (mpl/title "Noisy Sync" :ax ax))))
 
 (defun save-preferred-size-figure/matplotlib
-    (filename &key (width-pixels 2000) (height-pixels 1440) (dpi 200) eps?)
+    (filename &key (width-pixels 2000) (height-pixels 1440) (dpi 200))
   "FILENAME is a full, absolute path to the destination file."
   ;; I think if name is specified it uses it, otherwise it
   ;; puts name-prefix figure-window-title name-suffix with some fiddling,
@@ -1156,8 +1156,7 @@
                                 (search ".pdf" filename)
                                 (search ".eps" filename))
                             filename
-                            (format nil "~a.~a" filename
-                                    (if eps? "eps" "png")))))
+                            (format nil "~a.~a" filename "png"))))
     (assert fig)
     (let* ((old-size (pymethod (figure-handle fig) "get_size_inches"))
            (new-width-inches (round width-pixels dpi))
@@ -1599,7 +1598,12 @@
             when (not (equal (pymethod obj "get_subplotspec") "None"))
               do
                  (pymethod obj "set_subplotspec" (pycall "matplotlib.gridspec.SubplotSpec" gs count))
-                 (incf count))
+                 (incf count)
+                 ;; Update our understanding of them so user can go back to the axis with nexttile :tilenum
+                 ;; or subplot
+                 (let ((ax (find obj (figure-axes figure) :test (lambda (a b) (pyeval a "==" (axis-handle b))))))
+                   (assert ax)
+                   (setf (axis-subplot ax) (list nrows ncols count))))
       (pymethod (figure-handle figure) "subplots_adjust")
     (draw-figure figure))))
 
