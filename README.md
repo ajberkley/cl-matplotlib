@@ -13,5 +13,4 @@ git clone https://github.com/ajberkley/cl-matplotlib
 You will need to pip install PyQt6, matplotlib, numpy at least.  Start a virtual env if they aren't globally installed, then start up emacs / slime and (quicklisp:quickload :cl-matplotlib) and then (in-package:cl-matplotlib) then (start-loop) and then (plot-random-points) (mpl/figure 3) (plot-random-points)... or run (demo).  You can drag/drop plots to dock/undock them etc, click the float/unfloat button, etc.
 
 Note that if you are using Ubuntu22 please read the package doc-string for some kludge workarounds for Qt6 dockable windows and wayland issues
-
-<img width="2493" height="1570" alt="image" src="https://github.com/user-attachments/assets/44858e06-f2b4-4832-ac35-0dfb9ebcc3d4" />
+<img width="1851" height="1055" alt="image" src="https://github.com/user-attachments/assets/4ec76dbc-f8a3-41ef-a9ab-4220caad2d34" />
