@@ -1959,13 +1959,13 @@
                 (plot-errorbar (rand) (prand) (prand)
                                (rand) (prand) (prand)
                                :marker marker :linestyle linestyle :color color
-                               :ax ax)
+                               :ax ax :label "My data series")
                 (plot-xy-data (rand) (rand) :marker marker :linestyle linestyle
                                             :color color :ax ax))))
       (mpl/xlabel "position ($\\mu m$)" :ax ax)
       (mpl/ylabel "Resistance ($\\Omega$)" :ax ax)
       (mpl/title "My happy e$\\chi$periment" :ax ax)
-      (mpl/legend :legend-entries '("My data series") :ax ax)
+      (mpl/legend :ax ax)
       (draw-axis ax)
       ax)))
 
