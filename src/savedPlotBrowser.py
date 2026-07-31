@@ -65,9 +65,10 @@ class PreviewModel(QAbstractListModel):
         return len(self.previews)
 
 class plotBrowser(QMainWindow):
-    def __init__(self, interactive_directory, data_directory, select_callback, thumb_refresh_callback):
+    def __init__(self, interactive_directory, saved_directory, data_directory, select_callback, thumb_refresh_callback):
         super().__init__()
         self.data_directory = data_directory
+        self.saved_directory = saved_directory
         self.interactive_directory = interactive_directory
         self.globstr = self.interactive_directory + "/*" + FILENAME_SUFFIX
         self.setWindowTitle(f"Plot Browser: {self.globstr}")
@@ -111,6 +112,7 @@ class plotBrowser(QMainWindow):
         self.filename.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.interactive_button = QPushButton("Today's interactive plots")
         self.today_button = QPushButton("Today's logged plots")
+        self.saved_directory_button = QPushButton("Saved plots")
         self.close_button = QPushButton("close")
         self.refresh_button = QPushButton("refresh")
         self.chdir_button = QPushButton("chdir")
@@ -123,6 +125,7 @@ class plotBrowser(QMainWindow):
         self.toprow.layout.addWidget(self.chdir_button, stretch=0)
         self.toprow.layout.addWidget(self.refresh_button, stretch=0)
         self.toprow.layout.addWidget(self.today_button, stretch=0)
+        self.toprow.layout.addWidget(self.saved_directory_button, stretch=0)
         self.toprow.layout.addWidget(self.interactive_button, stretch=0)
         self.layout.addWidget(self.toprow, stretch=0)
         self.layout.addWidget(self.view, stretch=1)
@@ -131,6 +134,7 @@ class plotBrowser(QMainWindow):
         self.refresh()
         self.interactive_button.clicked.connect(lambda : self.chdir(self.interactive_directory))
         self.today_button.clicked.connect(lambda : self.chdir(self.data_directory + f"data-{datetime.today().strftime('%y-%m-%d')}/"))
+        self.saved_directory_button.clicked.connect(lambda : self.chdir(self.saved_directory))
         self.chdir_button.clicked.connect(self.get_dir)
         self.refresh_button.clicked.connect(self.refresh)
         self.close_button.clicked.connect(self.close)

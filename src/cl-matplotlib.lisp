@@ -571,10 +571,11 @@
 (defun validate-linestyle (linestyle)
   (when linestyle
     (etypecase linestyle
-      (string (assert (member linestyle '("-" "--" "-." ":" "none") :test 'equal)))
+      (string (assert (member linestyle '("-" "--" "-." ":" "none" "") :test 'equal)))
       (list (assert (and (= (length linestyle) 2) (numberp (first linestyle))
                          (typep (second linestyle) 'sequence)
-                         (every #'numberp (second linestyle))))))))
+                         (every #'numberp (second linestyle))))))
+    linestyle))
 
 (defun parse-subplot-id (subplot-id)
   (if (numberp subplot-id)
@@ -1007,8 +1008,13 @@
 
 (defun mpl/grid (&key (switch :on) (which :major) (ax (gca)) (draw t))
   (assert ax nil "No current axis")
+  (check-type switch (member :on :off))
+  (check-type which (member :major :minor))
+  (when (and (eq which :minor) (eq switch :on))
+    ;; Need to make sure minor ticks are on
+    (pymethod (axis-handle ax) "minorticks_on"))
   (py4cl2:pymethod (axis-handle ax) "grid"
-                   (if (member switch '(:on :minor)) t nil)
+                   (if (eq switch :on) t nil)
                    :which (if (eq which :minor) "minor" "major"))
   (when draw (draw-axis ax)))
 
@@ -1259,6 +1265,16 @@
  a NUM-COLORMAP-PTS x 4 array of double-floats representing RGBA"
   (pycall colormap (loop for i below num-pts collect i)))
 
+(defun validate-horizontal-alignment (horizontal-alignment)
+  (setf horizontal-alignment (string-downcase horizontal-alignment))
+  (assert (member horizontal-alignment '("left" "center" "right") :test 'string=))
+  horizontal-alignment)
+
+(defun validate-vertical-alignment (vertical-alignment)
+  (setf vertical-alignment (string-downcase vertical-alignment))
+  (member vertical-alignment '("center" "top" "bottom") :test 'string=)
+  vertical-alignment)
+
 (defun mpl/draw-vertical-line (x &key (ax (gca)) (line-colour "k") (linewidth 1)
                                    label (linestyle "-") displayname
                                    (omit-from-legend (not displayname))
@@ -1269,9 +1285,8 @@
                                    (label-y-fraction 0.5))
   "orientation may be 'vertical' or 'horizontal'.  horizontal-alignment may be
  'left' 'center' 'right' , vertical-alignment may be 'center' 'top' 'bottom'"
-  (validate-linestyle linestyle)
   (py4cl2:pymethod (axis-handle ax) "axvline" x :color line-colour :linewidth linewidth
-                                                :linestyle linestyle
+                                                :linestyle (validate-linestyle linestyle)
                                                 :label (if (or (not displayname) omit-from-legend)
                                                            "_"
                                                            displayname))
@@ -1282,8 +1297,8 @@
                      :transform (pymethod (axis-handle ax) "get_xaxis_transform")
                      :s label
                      :rotation orientation
-                     :horizontalalignment (string-downcase horizontal-alignment)
-                     :verticalalignment (string-downcase vertical-alignment)))
+                     :horizontalalignment (validate-horizontal-alignment horizontal-alignment)
+                     :verticalalignment (validate-vertical-alignment vertical-alignment)))
   (draw-axis (gca)))
 
 (defun mpl/draw-horizontal-line (y &key (ax (gca)) (line-colour "k") (linewidth 1)
@@ -1296,10 +1311,9 @@
                                      (label-x-fraction 0.5))
   "orientation may be 'vertical' or 'horizontal'.  horizontal-alignment may be
  'left' 'center' 'right' , vertical-alignment may be 'center' 'top' 'bottom'"
-  (validate-linestyle linestyle)
   (py4cl2:pymethod (axis-handle ax) "axhline" y
                    :color line-colour :linewidth linewidth
-                   :linestyle linestyle
+                   :linestyle (validate-linestyle linestyle)
                    :label (if (or (not displayname) omit-from-legend) "_" displayname))
   (when label
     (py4cl2:pymethod (axis-handle ax) "text"
@@ -1308,8 +1322,8 @@
                      :transform (pymethod (axis-handle ax) "get_yaxis_transform")
                      :s label
                      :rotation orientation
-                     :horizontalalignment (string-downcase horizontal-alignment)
-                     :verticalalignment (string-downcase vertical-alignment)))
+                     :horizontalalignment (validate-horizontal-alignment horizontal-alignment)
+                     :verticalalignment (validate-vertical-alignment vertical-alignment)))
   (draw-axis (gca)))
 
 (defun mpl/ginput (n)
@@ -1353,6 +1367,10 @@
 (defun mpl/set-axes-background-color (color &key (ax (gca)))
   (pymethod (axis-handle ax) "set_facecolor" color))
 
+(defun validate-rotation (rotation)
+  (assert (numberp rotation))
+  rotation)
+
 (defun mpl/draw-text (x y text
                       &key horizontal-alignment (fontsize 8) (color "k") vertical-alignment
                         interpreter rotation background-color normalized-x normalized-y
@@ -1362,12 +1380,14 @@
     (apply 'py4cl2:pymethod axh "text" x y text
            (append
             ;;(when interpreter (list :interpreter interpreter))
-            (when rotation (list :rotation rotation))
+            (when rotation (list :rotation (validate-rotation rotation)))
             (when background-color (list :backgroundcolor background-color))
             (when color (list :color color))
             (when fontsize (list :fontsize fontsize))
-            (when vertical-alignment (list :verticalalignment vertical-alignment))
-            (when horizontal-alignment (list :horizontalalignment horizontal-alignment))
+            (when vertical-alignment
+              (list :verticalalignment (validate-vertical-alignment vertical-alignment)))
+            (when horizontal-alignment
+              (list :horizontalalignment (validate-horizontal-alignment horizontal-alignment)))
             (when fontweight (list :fontweight fontweight))
             (cond
               ((and normalized-x normalized-y)
@@ -1959,13 +1979,13 @@
                 (plot-errorbar (rand) (prand) (prand)
                                (rand) (prand) (prand)
                                :marker marker :linestyle linestyle :color color
-                               :ax ax :label "My data series")
+                               :ax ax)
                 (plot-xy-data (rand) (rand) :marker marker :linestyle linestyle
                                             :color color :ax ax))))
       (mpl/xlabel "position ($\\mu m$)" :ax ax)
       (mpl/ylabel "Resistance ($\\Omega$)" :ax ax)
       (mpl/title "My happy e$\\chi$periment" :ax ax)
-      (mpl/legend :ax ax)
+      (mpl/legend :legend-entries '("My data series") :ax ax)
       (draw-axis ax)
       ax)))
 
@@ -2111,7 +2131,7 @@
     ax))
 
 (defun mpl/tripcolor (triangles x y z &key (ax (gca)) (colormap "viridis") (show-colorbar t)
-                                        zmin zmax)
+                                        zmin zmax edgecolor)
   (maybe-remove-axis-colorbar ax)
   (unless (typep triangles '(simple-array (unsigned-byte 32) (* 3)))
     (setf triangles (alexandria:copy-array triangles :element-type '(unsigned-byte 32))))
@@ -2120,6 +2140,7 @@
                     :triangles triangles
                     :cmap (maybe-sampled-colormap-to-cmap colormap)
                     (append
+                     (when edgecolor (list :edgecolor edgecolor))
                      (when zmin (list :vmin zmin))
                      (when zmax (list :vmax zmax))))))
       (when show-colorbar
