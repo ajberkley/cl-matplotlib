@@ -124,7 +124,9 @@
    #:*invisible-figure*
    #:mpl/toggle-title-visibility
    #:mpl/show-marker-types
-   #:mpl/show-linestyle-types)
+   #:mpl/show-linestyle-types
+   #:mpl/get-artist
+   #:mpl/set-annotations)
   (:documentation "Wrapper around much of matplotlib functionality focusing on its
  use in interactive plotting and data exploration.  The focus is on drawing and
  modifying a plot so follows the 'matlab' style where one has an 'active figure' and
@@ -719,6 +721,8 @@
 (defun start-loop ()
   "Call this to start the main gui loop"
   (start-up/internal)
+  ;; Force reload, works around file date issues on my FS
+  (py4cl2:pyexec "if 'PyQt6_cl_matplotlib' in sys.modules: del sys.modules['my_module']")
   (py4cl2:pyexec "import PyQt6_cl_matplotlib;")
   (py4cl2:raw-py-exec/no-return "PyQt6_cl_matplotlib.start_app(try_process_message);")
   (py4cl2:pycall "PyQt6_cl_matplotlib.set_callbacks"
@@ -1164,12 +1168,14 @@
                             filename
                             (format nil "~a.~a" filename "png"))))
     (assert fig)
+    ;; We quantize the size for comparing to see if we can avoid re-drawing.
     (let* ((old-size (pymethod (figure-handle fig) "get_size_inches"))
-           (new-width-inches (round width-pixels dpi))
-           (new-height-inches (round height-pixels dpi))
-           (is-same-size (and (= new-width-inches (elt old-size 0)) (= new-height-inches (elt old-size 1)))))
+           (new-width-inches (* 1000.0 (round width-pixels (/ dpi 1000.0))))
+           (new-height-inches (* 1000.0 (round height-pixels (/ dpi 1000.0))))
+           (is-same-size (and (= new-width-inches (round (* 1000 (elt old-size 0))))
+                              (= new-height-inches (round (* 1000 (elt old-size 1)))))))
       (unless is-same-size
-        (pymethod (figure-handle fig) "set_size_inches" new-width-inches new-height-inches))
+        (pymethod (figure-handle fig) "set_size_inches" (/ width-pixels dpi 1.0) (/ height-pixels dpi 1.0)))
       (pymethod (figure-handle fig) "savefig" full-filename :dpi dpi)
       (unless is-same-size
         (pymethod (figure-handle fig) "set_size_inches" old-size))
@@ -1733,8 +1739,9 @@
          (func-name (if rectilinear
                         (if filled "contourf" "contour")
                         (if filled "tricontourf" "tricontour"))))
-    (when rectilinear
-      (setf x (to-sadf x) y (to-sadf y)))
+    (setf x (to-sadf x) y (to-sadf y))
+    (unless (arrayp z)
+      (setf z (to-sadf z)))
     (let ((cs
             (apply 'pymethod (axis-handle ax) func-name
                    x y z
@@ -2097,38 +2104,51 @@
     (exterior &key holes (ax (gca)) facecolor (edgecolor "black")
                 autoscale-axis (alpha 0.3) (fill (if (equal facecolor "none") nil t)))
   "matplotlib will automatically handle filling correctly if holes go the opposite
- direction of the outside.  Have to be careful to return from the holes back to the
- last point of the polygon to avoid uncoloring other regions."
+ direction of the outside.
+
+ (loop for n in (reverse '(4 5 6 7 8 9 10 300 3000))
+                 do
+                    (mpl/plot-polygon (loop for angle in (linspace 0.0 nil (* 2 pi) :n n)
+                                            collect (list (sin angle) (cos angle)))
+                                  :holes '(((0.0 0.25) (-0.25 -0.25) (0.25 -0.25))))))"
   (unless facecolor (setf facecolor (find-next-color ax)))
-  (labels ((add-polygon (poly)
-             (pymethod (axis-handle ax)
-                       "add_patch"
-                       (pycall "matplotlib.patches.Polygon"
-                               poly
-                               :facecolor facecolor
-                               :edgecolor edgecolor
-                               :alpha alpha
-                               :fill fill))))
-    (let ((exterior-direction (signum (mpl/shoelace exterior))))
-      (setf holes
-            (map 'list (lambda (hole)
-                         (if (= (signum (mpl/shoelace hole)) exterior-direction)
-                             (reverse hole)
-                             hole))
-                 holes)))
-    ;; Make sure we return to the point where the hole drawing started
-    ;; so we don't end up with unfilled regions by accident when we have
-    ;; more than one hole.
-    (let ((exit-from-hole (car (last exterior))))
-      (add-polygon
-       (apply 'append exterior
-              (map 'list (lambda (hole)
-                           (append hole (list exit-from-hole)))
-                   holes))))
-    (draw-axis ax)
-    (when autoscale-axis
-      (pymethod (axis-handle ax) "autoscale_view"))
-    ax))
+  (let ((exterior-direction (signum (mpl/shoelace exterior))))
+    (setf holes
+          (map 'list (lambda (hole)
+                       ;; Reverse direction if needed and add dummy vertex for CLOSEPOLY
+                       (if (= (signum (mpl/shoelace hole)) exterior-direction)
+                           (append (reverse hole) '((0.0 0.0)))
+                           (append hole '((0.0 0.0)))))
+               holes)))
+  ;; Add dummy vertex for CLOSEPOLY
+  (setf exterior (append exterior '((0.0 0.0))))
+  (let ((moveto (pyeval "matplotlib.path.Path.MOVETO"))
+        (lineto (pyeval "matplotlib.path.Path.LINETO"))
+        (closepoly (pyeval "matplotlib.path.Path.CLOSEPOLY")))
+    (labels ((make-path (verts)
+               (let* ((num-verts (length verts))
+                      (a (make-array num-verts :element-type '(unsigned-byte 8) :initial-element lineto)))
+                 (setf (aref a 0) moveto)
+                 (setf (aref a (- num-verts 1)) closepoly)
+                 a)))
+      (let* ((polygon-path (make-path exterior))
+             (hole-paths (map 'list #'make-path holes))
+             (all-paths
+               (apply 'concatenate '(simple-array (unsigned-byte 8) (*)) polygon-path hole-paths))
+             (poly-points (apply 'append exterior holes)))
+        (when (> (length poly-points) 100)
+          ;; convert to an array for transmission to python
+          (setf poly-points
+                (make-array (list (length poly-points) 2) :element-type 'double-float :initial-contents
+                            (map 'list (lambda (x) (list (float (elt x 0) 0d0)
+                                                         (float (elt x 1) 0d0))) poly-points))))
+        (let* ((path (pycall "matplotlib.path.Path" poly-points all-paths))
+               (patch (pycall "matplotlib.patches.PathPatch" path :facecolor facecolor :edgecolor edgecolor :alpha alpha :fill fill)))
+          (pymethod (axis-handle ax) "add_patch" patch)))))
+  (draw-axis ax)
+  (when autoscale-axis
+    (pymethod (axis-handle ax) "autoscale_view"))
+  ax)
 
 (defun mpl/tripcolor (triangles x y z &key (ax (gca)) (colormap "viridis") (show-colorbar t)
                                         zmin zmax edgecolor)
@@ -2253,3 +2273,18 @@
           (let ((*invisible-figure* t))
             (funcall thunk))
         (py4cl2:pycall "headless_matplotlib.closeallfigs")))))
+
+(defun mpl/set-annotations (artist annotations)
+  "Takes an array of strings of the same length as elements drawn in the artist."
+  (py4cl2:pyexec "PyQt6_cl_matplotlib.annotations_map[" artist "] = " annotations))
+
+(defun mpl/get-artist (&key (type '|matplotlib.lines.Line2D|))
+  "Returns the latest artist of TYPE drawn on axis"
+  (let* ((ax (gca))
+         (children (pymethod (axis-handle ax) "get_children")))
+    (loop for child across (reverse children)
+          for is-line = (pycall "isinstance" child type)
+          until is-line
+          finally
+             (assert is-line nil "Could not find data series to label")
+             (return child))))

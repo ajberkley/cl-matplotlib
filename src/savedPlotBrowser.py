@@ -110,7 +110,7 @@ class plotBrowser(QMainWindow):
         # Top row, refresh button and filename and directory selector
         self.filename = QLabel("Double click to open plot, single click to see name here")
         self.filename.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.interactive_button = QPushButton("Today's interactive plots")
+        self.interactive_button = QPushButton("Plots from REPL")
         self.today_button = QPushButton("Today's logged plots")
         self.saved_directory_button = QPushButton("Saved plots")
         self.close_button = QPushButton("close")

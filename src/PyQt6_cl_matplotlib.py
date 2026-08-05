@@ -2,7 +2,17 @@ import sys
 import time
 import math
 import numpy as np
+import threading
+import weakref
 import PyQt6
+import matplotlib
+
+try:
+    import mplcursors
+    mplcursors_installed = True
+except ModuleNotFoundError:
+    print("mplcursors library not installed, data cursors not available, upgrade your container")
+    mplcursors_installed = False
 
 from matplotlib.backends.backend_qtagg import FigureCanvas
 from matplotlib.backends.backend_qtagg import \
@@ -10,11 +20,14 @@ from matplotlib.backends.backend_qtagg import \
 from matplotlib.backends.qt_compat import QtWidgets
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backend_bases import key_press_handler
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QHBoxLayout, QVBoxLayout, QWidget, QRubberBand, QLayout, QPushButton, QStyle, QFrame
 from PyQt6 import QtCore
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QMouseEvent, QCloseEvent, QKeyEvent
+
+from collections import Counter
 
 set_active_figure = None
 close_window_callback = None
@@ -26,6 +39,17 @@ redo_callback = lambda: None
 delete_callback = lambda: None
 new_figure_func = lambda: None
 toggle_title_vis_callback = lambda: None
+# Add annotation stuff here
+annotations_map = weakref.WeakKeyDictionary() # lookup from artist to an array of annotations
+def default_annotation (artist, pt, original_text):
+    if artist in annotations_map:
+        annotations = annotations_map[artist]
+        idx = round(pt) # index now
+        return f"{annotations[idx]}\n{original_text}"
+    return original_text
+    
+get_annotation_callback = lambda figure_id, axes, artist, original_text, pt: default_annotation(artist, pt, original_text)
+
 # We do not let pyplot manage figure activeness, as we need thread local
 # active figures (logging can occur simultaneous to user interactive plotting,
 # headless figures can be drawn at the same time, etc).
@@ -42,9 +66,6 @@ def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_ca
     delete_callback = delete_callback_in
     new_figure_func = new_figure_callback_in
     toggle_title_vis_callback = toggle_title_vis_callback_in
-
-from matplotlib.backend_bases import key_press_handler
-from matplotlib.backend_tools import ToolBase, ToolToggleBase
 
 class DraggableLabel:
     """ Used for axes titles and figure suptitles, only allows us to
@@ -187,8 +208,6 @@ class InteractiveLegend(object):
             self.set_visible(visible, legend_handle)
         self.fig.canvas.draw()
 
-import threading
-
 main_window = None
 other_windows_lock = threading.Lock()
 other_windows = []
@@ -266,10 +285,36 @@ class MplDockWidget(QDockWidget):
         button = QPushButton("Legend")
         button_newfig = QPushButton("NewFig")
         button_titlevis = QPushButton("Title")
+        button_tooltips = QPushButton("Data cursor")
+        button_tooltips.setCheckable(True)
+        if mplcursors_installed:
+            self.toolbar.addWidget(button_tooltips)
         self.toolbar.addWidget(button_titlevis)
         self.toolbar.addWidget(button_newfig)
         self.toolbar.addWidget(button)
         global new_figure_func
+        self.cursor = None
+        self.button_tooltips = button_tooltips
+        def toggle_tooltips ():
+            if self.button_tooltips.isChecked():
+                if self.cursor:
+                    self.cursor.enabled = False
+                # Always create a new one to scan all artists again
+                self.old_cursor = self.cursor
+                self.cursor = mplcursors.cursor(self.figure, hover=False, multiple=True)
+                def get_annotation(sel):
+                    global get_annotation_callback
+                    sel.annotation.set_text(get_annotation_callback(self.unique_figure_id, sel.artist.axes, sel.artist, sel.annotation.get_text(), sel.index))
+                self.cursor.connect("add", get_annotation)
+                if self.old_cursor:
+                    self.old_cursor.visible = False
+                    for sel in self.old_cursor.selections:
+                        self.cursor.add_selection(sel, sel.artist.get_figure(), sel.artist.axes)
+                    self.old_cursor.remove()
+            if not self.button_tooltips.isChecked():
+                if self.cursor:
+                    self.cursor.enabled = False
+        button_tooltips.clicked.connect(toggle_tooltips)
         button_titlevis.clicked.connect(lambda: toggle_title_vis_callback())
         button_newfig.clicked.connect(lambda: new_figure_func())
         button.clicked.connect(lambda: legend_toggle_func(self.unique_figure_id))
@@ -380,6 +425,10 @@ class MplDockWidget(QDockWidget):
                     pass
     
     def on_pick(self, event):
+        # If in data cursor mode, no highlighting
+        if self.button_tooltips.isChecked():
+            self.clear_highlight()
+            return
         artist = event.artist
         if not hasattr(artist, "get_xdata"): # can be other objects that get picked (titles, labels, etc)
             return
@@ -536,8 +585,6 @@ def TabFigure (figure):
                 if not FigureWindowStatus(figure) == "docked":
                     DockFigure(figure, main_window)
 
-from collections import Counter
-
 def count_duplicates(items):
     counts = Counter(items)
     duplicates = {item: count for item, count in counts.items()}
@@ -587,8 +634,6 @@ def delete_errorbar(errorbarContainer):
         bar.remove()
 
 counter = 1
-
-import matplotlib
 
 def start_app (try_process_message):
     global main_window
