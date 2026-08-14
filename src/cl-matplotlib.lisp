@@ -712,7 +712,7 @@
   (pyexec "import matplotlib; import matplotlib.pyplot as plt")
   (pyeval "plt.ion()")
   (pyeval "matplotlib.style.use('fast')")
-  (pyexec "matplotlib.rcParams['axes.formatter.limits'] = (-2, 2)")
+  (pyexec "matplotlib.rcParams['axes.formatter.limits'] = (-3, 3)")
   (pyexec "matplotlib.rcParams['axes.formatter.use_mathtext'] = True")
   (pyexec (format nil "matplotlib.rcParams['savefig.directory'] = '~A'"
                   *default-pathname-defaults*))
@@ -1454,6 +1454,7 @@
                      fontweight title-fontsize)
   "location is 'upper left' best etc."
   (pyexec "from PyQt6_cl_matplotlib import enable_legend_interactivity")
+  (assert ax)
   (when legend-entries
     (mpl/relabel-data-series-with-labels legend-entries))
   (let ((leg (apply 'py4cl2:pymethod (axis-handle ax)
@@ -1469,11 +1470,15 @@
                      (when labelcolor (list :labelcolor labelcolor))
                      (when fontweight (list :fontweight fontweight))
                      (when bbox-to-anchor (list :bbox_to_anchor bbox-to-anchor))))))
-    (pymethod leg "set_draggable" t)
-    ;; We need to keep the interactive legend object alive, so
-    ;; we stuff it into the axes object
-    (push (pycall "enable_legend_interactivity" (axis-handle ax) leg)
-          (axis-interactive-legends ax)))
+    (cond
+      ((equal leg "None") ;; not sure why this happens, but it does sometimes!
+       (warn "legend call returned None"))
+      (t
+       (pymethod leg "set_draggable" t)
+       ;; We need to keep the interactive legend object alive, so
+       ;; we stuff it into the axes object
+       (push (pycall "enable_legend_interactivity" (axis-handle ax) leg)
+             (axis-interactive-legends ax)))))
   (draw-axis ax))
 
 (defun mpl/set-legend-string-on-last-data-series (legend-string &key (show-legend t))
@@ -1885,6 +1890,23 @@
          containers)
     (draw-axis ax)))
 
+(defun to-simple-array-double-float (input &optional (nil-value 0d0) (nan-value 0d0))
+  (if (typep input 'sequence)
+      (to-sadf input)
+      (if (typep input '(simple-array double-float *))
+          input
+          (let* ((dims (array-dimensions input))
+                 (new-array (make-array dims :element-type 'double-float)))
+            (dotimes (i (array-total-size input))
+              (let ((d (row-major-aref input i)))
+                (setf (row-major-aref new-array i)
+                      (if (null d)
+                          nil-value
+                          (if (and (typep d 'float) (float-features:float-nan-p d))
+                              nan-value
+                              (coerce d 'double-float))))))
+            new-array))))
+
 (defun mpl/plot-image (image-data &key (x0 0) (dx 1) (y0 0) (dy 1)
                               colormap xdim ydim use-alpha alpha-stencil
                                     colorbar-label colorbar-min colorbar-max clip)
@@ -1900,21 +1922,26 @@
          (x-range (list x0 (+ x0 (* (1- (second dimensions)) dx))))
          (y-range (list y0 (+ y0 (* (1- (first dimensions)) dy))))
          (min sb-ext:double-float-positive-infinity)
-         (max sb-ext:double-float-negative-infinity))
-    (loop for i below (array-dimension image-data 0)
-          do (loop for j below (array-dimension image-data 1)
-                   for d = (aref image-data i j)
-                   do
-                      (when (not (float-features:float-nan-p d))
-                        (when (> d max) (setf max d))
-                        (when (< d min) (setf min d)))))
+         (max sb-ext:double-float-negative-infinity)
+         (alpha-stencil (if (and use-alpha alpha-stencil)
+                            (to-simple-array-double-float alpha-stencil)
+                            (make-array dimensions :element-type 'double-float :initial-element 1d0))))
+    ;; image-data may have NIL or NaNs in it.  Take those out and put them in ALPHA-STENCIL
+    (dotimes (i (array-total-size image-data))
+      (let ((d (row-major-aref image-data i)))
+        (if (or (not d) (and (typep d 'float) (float-features:float-nan-p d)))
+            (setf (row-major-aref alpha-stencil i) 0d0)
+            (progn
+              (when (> d max) (setf max d))
+              (when (< d min) (setf min d))))))
+    (setf image-data (to-simple-array-double-float image-data 0d0 0d0))
     (unless colormap (setf colormap "viridis"))
     (let* ((ax (gca))
            (axh (axis-handle ax))
            (cmap (maybe-sampled-colormap-to-cmap colormap)))
       ;; should create the clipped colorbar mapping here...
       (py4cl2:pymethod axh "imshow" image-data
-                       :cmap cmap :alpha (or (and use-alpha alpha-stencil) "None")
+                       :cmap cmap :alpha alpha-stencil
                        :extent (append x-range y-range)
                        :aspect "auto" :origin "lower") ;; flip so matches matlab
       (let ((real-min (or colorbar-min min))
@@ -1948,9 +1975,10 @@
           do (when (or (not min-spacing) (< (- b a) min-spacing))
                (setf min-spacing (- b a))))
     (let ((ax (gca)))
+      (setf data (remove-if (lambda (x) (zerop (second x))) data))
       (apply 'py4cl2:pymethod (axis-handle ax)
              "bar"
-             (map 'list #'first data) ;; can be anythings
+             (to-sadf data #'first)
              (map '(simple-array double-float (*))
                   (lambda (x) (coerce (second x) 'double-float))
                   data)
