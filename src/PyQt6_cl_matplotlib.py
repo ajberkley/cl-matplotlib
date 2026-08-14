@@ -39,16 +39,6 @@ redo_callback = lambda: None
 delete_callback = lambda: None
 new_figure_func = lambda: None
 toggle_title_vis_callback = lambda: None
-# Add annotation stuff here
-annotations_map = weakref.WeakKeyDictionary() # lookup from artist to an array of annotations
-def default_annotation (artist, pt, original_text):
-    if artist in annotations_map:
-        annotations = annotations_map[artist]
-        idx = round(pt) # index now
-        return f"{annotations[idx]}\n{original_text}"
-    return original_text
-    
-get_annotation_callback = lambda figure_id, axes, artist, original_text, pt: default_annotation(artist, pt, original_text)
 
 # We do not let pyplot manage figure activeness, as we need thread local
 # active figures (logging can occur simultaneous to user interactive plotting,
@@ -302,10 +292,6 @@ class MplDockWidget(QDockWidget):
                 # Always create a new one to scan all artists again
                 self.old_cursor = self.cursor
                 self.cursor = mplcursors.cursor(self.figure, hover=False, multiple=True)
-                def get_annotation(sel):
-                    global get_annotation_callback
-                    sel.annotation.set_text(get_annotation_callback(self.unique_figure_id, sel.artist.axes, sel.artist, sel.annotation.get_text(), sel.index))
-                self.cursor.connect("add", get_annotation)
                 if self.old_cursor:
                     self.old_cursor.visible = False
                     for sel in self.old_cursor.selections:
@@ -696,3 +682,36 @@ def start_app (try_process_message):
     timer_maybe_hide.start(500);
     app.exec()
     print("No more windows, returning to default message_dispatch_loop")
+
+################################################################################
+# WELDING - Tying Python Objects to Lisp Objects
+#
+# The Welding functions in Lisp allow attaching Python objects to Lisp objects so that
+# the python objects are not GCed until the Lisp objects are.  On the python side it's
+# pretty simple, we just keep the numbered python objects in a dictionary until Lisp
+# asks us to do something with them.
+
+welds = {} # Use a dict rather than a list because welds will be dynamically created and destroyed.
+weld_max = 0 # Max weld we've got in welds.
+def weld(weld_id, python_value):
+    global welds, weld_max
+    welds[weld_id] = python_value
+    weld_max = max(weld_id, weld_max)
+
+def unweld(weld_id):
+    global welds
+    if weld_id in welds:
+        del welds[weld_id]
+
+def unweld_from(weld_id):
+    global welds, weld_max
+    if weld_id == 0:
+        welds = {}
+        weld_max = 0
+    elif weld_id < weld_max:
+        welds = {k: v for k, v in weld.items() if k < weld_id}
+        weld_max = weld_id
+
+def weld_value(weld_id):
+    global welds
+    return welds.get(weld_id)
