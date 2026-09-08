@@ -122,8 +122,6 @@ class InteractiveLegend(object):
         self.legend_handle_to_axes_handle = self._build_lookups(legend)
         self._setup_connections()
 
-        self.fig.canvas.draw()
-
     def _setup_connections(self):
         for artist in self.legend.texts + self.legend.legend_handles:
             artist.set_picker(10) # 10 points tolerance
@@ -345,7 +343,8 @@ class MplDockWidget(QDockWidget):
             global delete_callback
             self.clear_highlight()
             # trace_id and axis_id
-            delete_callback(self.selected_data[-2], self.selected_data[-1])
+            if self.selected_data:
+                delete_callback(self.selected_data[-2], self.selected_data[-1])
         key_press_handler(event, self.canvas, self.toolbar)
 
     def make_active(self):
@@ -682,36 +681,3 @@ def start_app (try_process_message):
     timer_maybe_hide.start(500);
     app.exec()
     print("No more windows, returning to default message_dispatch_loop")
-
-################################################################################
-# WELDING - Tying Python Objects to Lisp Objects
-#
-# The Welding functions in Lisp allow attaching Python objects to Lisp objects so that
-# the python objects are not GCed until the Lisp objects are.  On the python side it's
-# pretty simple, we just keep the numbered python objects in a dictionary until Lisp
-# asks us to do something with them.
-
-welds = {} # Use a dict rather than a list because welds will be dynamically created and destroyed.
-weld_max = 0 # Max weld we've got in welds.
-def weld(weld_id, python_value):
-    global welds, weld_max
-    welds[weld_id] = python_value
-    weld_max = max(weld_id, weld_max)
-
-def unweld(weld_id):
-    global welds
-    if weld_id in welds:
-        del welds[weld_id]
-
-def unweld_from(weld_id):
-    global welds, weld_max
-    if weld_id == 0:
-        welds = {}
-        weld_max = 0
-    elif weld_id < weld_max:
-        welds = {k: v for k, v in weld.items() if k < weld_id}
-        weld_max = weld_id
-
-def weld_value(weld_id):
-    global welds
-    return welds.get(weld_id)

@@ -714,7 +714,7 @@
   (pyexec "import matplotlib; import matplotlib.pyplot as plt")
   (pyeval "plt.ion()")
   (pyeval "matplotlib.style.use('fast')")
-  (pyexec "matplotlib.rcParams['axes.formatter.limits'] = (-3, 3)")
+  (pyexec "matplotlib.rcParams['axes.formatter.limits'] = (-4, 4)")
   (pyexec "matplotlib.rcParams['axes.formatter.use_mathtext'] = True")
   (pyexec (format nil "matplotlib.rcParams['savefig.directory'] = '~A'"
                   *default-pathname-defaults*))
@@ -2320,172 +2320,67 @@
              (return child))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; WELDING - Tying python objects to Lisp objects
+;; Reapers and Moribund objects
 ;;
-;; This code allows one to (weld lisp-object "some_python_expression") so that the python code is
-;; evaluated and the result is welded to the lisp object.  You can then call (welds lisp-object) to
-;; return all the welded python objects.
+;; When you return an object from Python, py4cl2 actually stores in on the python side and passes
+;; you back a numeric reference wrapped in an object.  This lisp side object has a finalizer that
+;; will free the python side reference when the lisp side object goes away. But this isn't quite
+;; enough; we want two more features:
 ;;
-;; Welding prevents the python object from being garbage collected until the Lisp object is garbage
-;; collected.
+;;   1. The ability to do extra work in that finalizer (For example, to automatically remove a plot
+;;      annotation when lisp no longer has a reference to it), and
+;;   2. The ability to trigger that extra work immediately, to remove an annotation, regardless of
+;;      who is referencing it, and without needing to run `sb-ext:gc` to trigger finalizers.
 ;;
-;; On the python side, you can call `weld_value(ID)` to get the python value. The ID you'd get from
-;; caling weld-id on a lisp side weld.  These IDs are just unsigned numbers.
+;; Reapers provide this: They contain the extra-cleanup function and a boolean flag to prevent
+;; double-execution. If your lisp object holds py4cl2 handle(s), you can instantiate a reaper with
+;; the necessary cleanup instructions and install it as a finalizer on that lisp object.
+;; 
+;; **The reaper should not have a reference to the lisp object (that would prevent GC) but the
+;; reaper can have references to the py4cl2 objects.**
 ;;
-;; Example:
-;;
-;;    (defvar *a-thing* (list 'a 'thing))
-;;    (weld *a-thing* "4" "+" "4")
-;;    (welds *a-thing*)
-;;    (wild-id (first (welds *a-thing*)))
-;;    (py4cl2:pyeval *py-package* "weld_value(" (wild-id (first (welds *a-thing*))) ")")
-;;     => should be 8
-;;
-;;    (setf *a-thing* nil)
-;;    (sb-ext:gc :full t)
-;;    (py4cl2:pyeval *py-package* "weld_value(" (wild-id (first (welds *a-thing*))) ")")
-;;     => should be None.
+;; A moribund structure is a structure that sees death coming for it (it has a handle to it's own
+;; reaper)!  You can hook up your structures close and closed-p methods to the reaper. This gives
+;; you a structure that is closable, closes on GC, and closes only once.
 
-(defparameter *py-package* "PyQt6_cl_matplotlib.")
+(defstruct (reaper (:conc-name "") (:constructor make-reaper (reap-fn)))
+  "A reaper is the bookkeeping for the dead.  It stores a reaping function and ensures it's only
+   executed once. It's useful for making finalizers and close-this-thing functions work together
+   nicely."
+  (reaped-p nil :type boolean :read-only nil)
+  (reap-fn #'(lambda () nil) :type function :read-only t))
 
-(defvar *weld-mutex* (sb-thread:make-mutex :name "Weld mutex."))
-(defvar *welds* (make-hash-table :weakness :key) "Maps lisp-object -> list of welds")
-(defvar *weld-counter* 0)
-(defstruct weld
-  "A weld is basically a numeric ID that can be looked up on the python side to get the
-  'other side' of the weld.  They are created with the weld function which ties a lisp object
-   to a python object so that the python object isn't GCed until the Lisp object is.
-   Welds can also be explicitly unwelded on the lisp side.
+(defun reap (reaper)
+  "Unless already reaped, run the reaping function (and claim soul, most likely)."
+  (declare (type reaper reaper))
+  (when (eq nil (sb-ext:compare-and-swap (reaped-p reaper) nil t))
+    (funcall (reap-fn reaper))))
 
-   This type represents a standard weld and is created by the weld function. It's expected
-   to be 'subclassed' by more specific types like annotation. But this base type is the
-   basic machinery."
-  (id nil :type (unsigned-byte 32) :read-only t)
+(defstruct moribund
+  "A moribund object is one that knows death awaits it. It holds a handle to it's own reaper
+   and can ask it if it's dead already.  Usually the reaper will also be installed as a finalizer
+   to reap objects we don't have handles too."
+  (reaper nil :type reaper :read-only t))
 
-  ;; Weak pointer to the owner so that having welds doesn't prevent owner from being GCed.
-  (owner-ptr nil :type sb-ext:weak-pointer :read-only t)
-
-  ;; These close slots support manual unwelding and also automatic unwelding when GCed. They
-  ;; also prevent double free bugs. That's why it's not just a closed-p boolean slot.
-  (closed-p-indirect nil :type cons :read-only t)
-  (close-fn nil :type function :read-only t))
-
-(defun unweld-abandoned ()
-  "Unweld any weld on the python side with an id >= *weld-counter*. Basically the
-   lisp session only knows upto *weld-counter*, so if Python has higher weld counts than
-   that, they're not valid so ditch them."
-  (py4cl2:pyexec *py-package* "unweld_from(" *weld-counter* ")"))
-
-(defun weld* (weld-constructor lisp-object python-expression &rest more-python-expression)
-  "Welds the Lisp object to the Python object returned by evalling the python expression.
-   The python object will be maintained until this lisp object is GCed.
-   Multiple things can be welded to a single lisp object.
-
-   This method is the basic process. The actual weld object instance is created by calling the weld
-   constructor with the lisp object and the weld id. It's expected to return a weld structure or
-   weld subclass structure and a free function suitable for gc-ext:finalize."
-  (assert (typecase lisp-object
-            (number nil)
-            (string nil)
-            (symbol nil)
-            (otherwise t))
-          nil
-          "Welding to atoms isn't a good idea. They'll never GC.")
-  (sb-thread:with-mutex (*weld-mutex*)
-    (unweld-abandoned)
-    (apply #'py4cl2:pyeval *py-package* "weld(" *weld-counter* ", " python-expression (append more-python-expression (list ")")))
-    (multiple-value-bind (weld close-fn) (funcall weld-constructor lisp-object *weld-counter*)
-      (sb-ext:finalize weld close-fn)
-      (push weld (gethash lisp-object *welds*))
-      (incf *weld-counter*)
-      weld)))
-
-(defun construct-weld (lisp-object id)
-  "Construct a standard weld, returning the weld object and it's unweld function."
-  (let* ((closed-p-indirect (list nil))
-         (close-fn (let ((id *weld-counter*))
-                     #'(lambda ()
-                         (unless (car closed-p-indirect)
-                           (setf (car closed-p-indirect) t)
-                           (ignore-errors (python-unweld id)))))))
-    (values (make-weld
-             :id id
-             :owner-ptr (sb-ext:make-weak-pointer lisp-object)
-             :closed-p-indirect closed-p-indirect
-             :close-fn close-fn)
-            close-fn)))
-
-(defun weld (lisp-object python-expression &rest more-python-expression)
-  "Welds the Lisp object to the Python object returned by evalling the python expression.
-   The python object will be maintained until this lisp object is GCed.
-   Returns a standard weld."
-  (apply #'weld* #'construct-weld lisp-object python-expression more-python-expression))
-
-(defun python-unweld (id)
-  (py4cl2:pyexec *py-package* "unweld(" id ")"))
-
-(defun reset-welds ()
-  "Reset everything. All welds forgotten."
-  (sb-thread:with-mutex (*weld-mutex*)
-    ;; Mark all the welds on the Lisp side as closed, then
-    ;; forget them.
-    (maphash #'(lambda (k v)
-                 (declare (ignore k))
-                 (dolist (weld v)
-                   (ignore-errors (funcall (weld-close-fn weld)))))
-             *welds*)
-    (clrhash *welds*)
-
-    ;; Close all the welds on the Python side.
-    (setf *weld-counter* 0)
-    (unweld-abandoned)))
-
-(defun welds (lisp-object)
-  "Returns all the welds made to a lisp object."
-  (gethash lisp-object *welds*))
-
-(defun weld-owner (weld)
-  "Returns the lisp object that owns this weld, or nil if the object was GCed"
-  (sb-ext:weak-pointer-value (weld-owner-ptr weld)))
-
-(defun weld-closed-p (weld)
-  "Returns T if the weld is closed, nil otherwise."
-  (car (weld-closed-p-indirect weld)))
-
-(defun unweld (weld)
-  "Unwelds a connection, freeing the python object and removing the weld from it's
-   owners list of welds."
-  (funcall (weld-close-fn weld))
-  (let ((owner (weld-owner weld)))
-    (when owner
-      (sb-thread:with-mutex (*weld-mutex*)
-        (setf (gethash owner *welds*)
-              (remove weld (gethash owner *welds*))))))
-  weld)
+(defun dont-fear-the-reaper (moribund &aux (reaper (moribund-reaper moribund)))
+  "Registers the reaper stored on the moribund as the finalizer of the moribund. The name of
+   this function is awesome."
+  (sb-ext:finalize moribund #'(lambda () (reap reaper))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Annotations
 ;;
-;; An annotation is a type of weld.  It lets you draw arbitrarily on the plot.  One use of this is
-;; implementing callout annotations that are used for tooltips.
+;; An annotation is a moribund structure. It lets you draw arbitrarily on the plot.  One use of
+;; this is implementing callout annotations that are used for tooltips.
 
-(defstruct (annotation (:include weld)))
+(defstruct (annotation (:include moribund))
+  (handle nil :type python-object :read-only t))
 
-(defun construct-annotation-weld (axis lisp-object weld-id)
-  "Construct an annotation weld, returning the weld object and it's unweld function."
-  (let* ((closed-p-indirect (list nil))
-         (close-fn #'(lambda ()
-                       (unless (car closed-p-indirect)
-                         (setf (car closed-p-indirect) t)
-                         (ignore-errors (py4cl2:pyexec *py-package* "weld_value(" weld-id ").remove()"))
-                         (ignore-errors (draw-axis axis))
-                         (ignore-errors (python-unweld weld-id))))))
-    (values (make-annotation
-             :id weld-id
-             :owner-ptr (sb-ext:make-weak-pointer lisp-object)
-             :closed-p-indirect closed-p-indirect
-             :close-fn close-fn)
-            close-fn)))
+(defun remove-annotation (annotation)
+  (reap (annotation-reaper annotation)))
+
+(defun annotation-closed-p (annotation)
+  (reaped-p (annotation-reaper annotation)))
 
 (defun annotate (axis text xy
                  &key xytext
@@ -2501,64 +2396,30 @@
   (declare (type cons xy))
   (assert (numberp (car xy)))
   (assert (numberp (cadr xy)))
-  (prog1
-      (apply #'weld* (lambda (lisp-object id)
-                       (construct-annotation-weld axis lisp-object id))
-             axis (axis-handle axis)
-             ".annotate(\"\"\""
-             text
-             "\"\"\", xy=(" (car xy) ", " (cadr xy) ")"
-             (append
-              (when xytext
-                (assert (consp xytext))
-                (assert (numberp (car xytext)))
-                (assert (numberp (cadr xytext)))
-                (list ", xytext=(" (car xytext) "," (cadr xytext) ")"))
-              (when horizontal-alignment
-                (list ", horizontalalignment=" horizontal-alignment))
-              (when vertical-alignment
-                (list ", verticalalignment=" vertical-alignment ))
-              (when textcoords
-                (list ", textcoords=" textcoords))
-              (when xycoords
-                (cond ((axis-p xycoords)
-                       (list ", xycoords=" (axis-handle xycoords) ".transAxes"))
-                      (t (list ", xycoords=" xycoords))))
-              (when z-order
-                (list ", zorder=" z-order))
-              (when b-box
-                (destructuring-bind (&key boxstyle fc alpha ec) b-box
-                  (list ", bbox="
-                        (format nil "dict(~{~{~a=~a~}~^, ~})"
-                                (append
-                                 (when boxstyle
-                                   (list (list "boxstyle" boxstyle)))
-                                 (when fc
-                                   (list (list "fc" fc)))
-                                 (when alpha
-                                   (list (list "alpha" alpha)))
-                                 (when ec
-                                   (list (list "ec" ec))))))))
-              (when arrow-properties
-                (destructuring-bind (&key arrow-style connection-style shrink-b ec)
-                    arrow-properties
-                  (list ", arrowprops="
-                        (format nil "dict(~{~{~a=~a~}~^, ~})"
-                                (append
-                                 (when arrow-style
-                                   (list (list "arrowstyle" arrow-style)))
-                                 (when connection-style
-                                   (list (list "connectionstyle" connection-style)))
-                                 (when shrink-b
-                                   (list (list "shinkB" shrink-b)))
-                                 (when ec
-                                   (list (list "ec" ec))))))))
-              '(")")))
-    (draw-axis axis)))
-
-(defun remove-annotation (annotation)
-  (declare (type annotation annotation))
-  (unweld annotation))
+  (let* ((handle (apply #'pymethod (axis-handle axis)
+                        "annotate"
+                        text
+                        :xy xy
+                        (append
+                         (and xytext `(:xytext ,xytext))
+                         (and horizontal-alignment `(:horizontalalignment ,horizontal-alignment))
+                         (and vertical-alignment `(:verticalalignment ,vertical-alignment))
+                         (and textcoords `(:textcoords ,textcoords))
+                         (and xycoords `(:xycoords ,(if (axis-p xycoords)
+                                                        (pyslot-value (axis-handle xycoords) ".transAxes")
+                                                        xycoords)))
+                         (and z-order `(:zorder ,z-order))
+                         (and b-box `(:bbox ,b-box))
+                         (and arrow-properties `(:arrowprops ,arrow-properties)))))
+         (reaper (make-reaper
+                  #'(lambda ()
+                      (ignore-errors
+                       (pymethod handle "remove")
+                       (draw-axis axis)))))
+         (annotation (make-annotation :handle handle :reaper reaper)))
+    (dont-fear-the-reaper annotation)
+    (draw-axis axis)
+    annotation))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Callouts
@@ -2569,20 +2430,24 @@
 ;; Example:
 ;;
 ;;    (callout (gca) "Hello!" '(0 0) :xytext '(1 1))
-;;    (unweld *) ;; this removes it.
+;;    (remove-annotation *) ;; this removes it.
 
 (defparameter *callout-style*
-  '(:horizontal-alignment "\"left\""
-    :vertical-alignment "\"top\""
-    :z-order "numpy.inf"
-    :b-box (:boxstyle "\"round,pad=.5\""
-            :fc "\"yellow\""
-            :alpha "0.5" ;; passed to python unquoted (so = 0.5), no 0.5d0 or 0.5f0 risks.
-            :ec "\"k\"")
-    :textcoords "\"offset points\""
-    :arrow-properties (:arrow-style "\"->\""
-                       :connection-style "\"arc3\""
-                       :ec "\"k\"")))
+  `(:horizontal-alignment "left"
+    :vertical-alignment "top"
+    :z-order ,SB-EXT:SINGLE-FLOAT-POSITIVE-INFINITY
+    :b-box ,(let ((ht (make-hash-table)))
+              (setf (gethash "boxstyle" ht) "round,pad=.5")
+              (setf (gethash "fc" ht) "yellow")
+              (setf (gethash "alpha" ht) 0.5d0)
+              (setf (gethash "ec" ht) "k")
+              ht)
+    :textcoords "offset points"
+    :arrow-properties ,(let ((ht (make-hash-table)))
+                         (setf (gethash "arrowstyle" ht) "->")
+                         (setf (gethash "connectionstyle" ht) "arc3")
+                         (setf (gethash "ec" ht) "k")
+                         ht)))
 
 (defun callout (axis text xy &rest args
                 &key xytext
@@ -2636,7 +2501,7 @@
   "This is a state tracking object. They're weakly keyed on axis
    via the *tooltips* variable."
   (strings #() :type simple-vector :read-only nil)
-  (welds #() :type simple-vector :read-only nil))
+  (callouts #() :type simple-vector :read-only nil))
 
 (defun axis-num-points (&optional (axis (gca)))
   (or (pyeval "len(" (axis-handle axis) ".lines) > 0 and isinstance(" (axis-handle axis) ".lines[0], matplotlib.lines.Line2D) and len("(axis-handle axis)".lines[0].get_xdata())")
@@ -2648,13 +2513,13 @@
            new)))
   (defun resize-tooltips (tooltips num-points)
     (declare (type tooltips tooltips))
-    (with-slots (strings welds) tooltips
+    (with-slots (strings callouts) tooltips
       (when (< (length strings) num-points)
         (setf strings (resize-vector strings num-points ""))
-        (loop :for i :from num-points :below (length welds)
-              :when (aref welds i)
-                :do (unweld (aref welds i)))
-        (setf welds (resize-vector welds num-points nil))))
+        (loop :for i :from num-points :below (length callouts)
+              :when (aref callouts i)
+                :do (remove-annotation (aref callouts i)))
+        (setf callouts (resize-vector callouts num-points nil))))
     tooltips))
 
 (defun tooltips (axis)
@@ -2669,7 +2534,7 @@
   "Hides all the tooltips on an axis."
   (let ((tooltips (gethash axis *tooltips*)))
     (when tooltips
-      (map nil #'(lambda (v) (and v (unweld v))) (tooltips-welds tooltips))))
+      (map nil #'(lambda (v) (and v (remove-annotation v))) (tooltips-callouts tooltips))))
   (remhash axis *tooltips*))
 
 (defun nice-tooltip-location (axis point-index)
@@ -2695,16 +2560,16 @@
     (values
      (list x y)
      (list 12 12) ;; Offset in points.
-     "\"left\""
-     "\"bottom\"")))
+     "left"
+     "bottom")))
 
 (defun tooltip-visible-p (axis point-index)
   "Returns T if the tooltip is visible, nil otherwise."
   (let ((tooltips (tooltips axis)))
     (when (<= 0 point-index (- (length (tooltips-strings tooltips)) 1))
-      (let ((existing (aref (tooltips-welds tooltips) point-index)))
+      (let ((existing (aref (tooltips-callouts tooltips) point-index)))
         (and existing
-             (not (weld-closed-p existing)))))))
+             (not (annotation-closed-p existing)))))))
 
 (defun tooltip (axis point-index)
   "Shows (if necessary) and returns the tooltip for the specified point-index."
@@ -2715,9 +2580,9 @@
             point-index
             0 (- (length (tooltips-strings tooltips)) 1))
 
-    (let ((existing (aref (tooltips-welds tooltips) point-index)))
+    (let ((existing (aref (tooltips-callouts tooltips) point-index)))
       (when (or (null existing)
-                (weld-closed-p existing))
+                (annotation-closed-p existing))
         (multiple-value-bind (xy xytext horizontal-alignment vertical-alignment)
             (nice-tooltip-location axis point-index)
           (let ((string (aref (tooltips-strings tooltips) point-index)))
@@ -2730,7 +2595,7 @@
                            xy :xytext xytext
                            :horizontal-alignment horizontal-alignment
                            :vertical-alignment vertical-alignment))))
-        (setf (aref (tooltips-welds tooltips) point-index) existing))
+        (setf (aref (tooltips-callouts tooltips) point-index) existing))
       existing)))
 
 (defun set-tooltip (axis point-index text)
@@ -2744,9 +2609,9 @@
             point-index
             0 (- (length (tooltips-strings tooltips)) 1))
     (setf (aref (tooltips-strings tooltips) point-index) text)
-    (let ((existing (aref (tooltips-welds tooltips) point-index)))
+    (let ((existing (aref (tooltips-callouts tooltips) point-index)))
       (when existing
-        (unweld existing)))
+        (remove-annotation existing)))
     (tooltip axis point-index)))
 
 (defsetf tooltip set-tooltip)
@@ -2754,11 +2619,11 @@
 (defun hide-tooltip (axis point-index)
   "Hide a specific tooltip by point-index."
   (let ((tooltips (tooltips axis)))
-    (when (<= 0 point-index (- (length (tooltips-welds tooltips)) 1))
-      (let ((existing (aref (tooltips-welds tooltips) point-index)))
+    (when (<= 0 point-index (- (length (tooltips-callouts tooltips)) 1))
+      (let ((existing (aref (tooltips-callouts tooltips) point-index)))
         (when existing
-          (setf (aref (tooltips-welds tooltips) point-index) nil)
-          (unweld existing))))))
+          (setf (aref (tooltips-callouts tooltips) point-index) nil)
+          (remove-annotation existing))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Tooltip Builder
@@ -2787,7 +2652,8 @@
   (labels (make-array 4 :fill-pointer 0 :adjustable t :initial-element "") :type array :read-only t)
 
   ;; The data for that column (should match the number of points in the plot, but it's not enforced).
-  (data (make-array 4 :fill-pointer 0 :adjustable t :initial-element nil) :type array :read-only t)
+  ;; Each element of data is a simple-vector
+  (data (make-array 4 :fill-pointer 0 :adjustable t :initial-element #()) :type array :read-only t)
 
   ;; Whether this column of metadata will show up or not.
   ;; It's set to T when you populate the column. It's mostly just incase the
@@ -2803,9 +2669,9 @@
       (when (axis-p axis)
         (let* ((tooltips (tooltips axis))
                (strings (tooltips-strings tooltips))
-               (welds (tooltips-welds tooltips)))
+               (callouts (tooltips-callouts tooltips)))
           (loop :for i :below (length strings)
-                :for weld = (aref welds i)
+                :for callout = (aref callouts i)
                 :for new-string-parts
                   = (loop :with labels = (tooltips-builder-labels builder)
                           :with enabled = (tooltips-builder-enabled builder)
@@ -2813,14 +2679,17 @@
                           :for j :below (tooltips-builder-count builder)
                           :when (aref enabled j)
                             :collect (list (aref labels j)
-                                           (or (nth i (aref data j)) "")))
+                                           (let ((dsv (aref data j)))
+                                             (if (< i (length dsv))
+                                                 (elt dsv i)
+                                                 ""))))
                 ;; Colors not working yet. Fix later.
                 ;; :for new-string = (print (format nil "~{~{\bf{~a} \textcolor{blue}{~a}~}~^~%~}"
                 ;;                                  new-string-parts))
                 :for new-string = (format nil "~{~{~a: ~a~}~^~%~}" new-string-parts)
                 :do (setf (aref strings i) new-string)
-                :when (and weld (not (weld-closed-p weld)))
-                  :do (ignore-errors (py4cl2:pyexec *py-package* "weld_value(" (weld-id weld) ").set_text(\"\"\"" new-string "\"\"\")")))
+                :when (and callout (not (annotation-closed-p callout)))
+                  :do (ignore-errors (pymethod (annotation-handle callout) "set_text" new-string)))
           (draw-axis axis))))))
 
 (defun tooltips-builder (axis)
@@ -2843,8 +2712,8 @@
                                         ;(when (pyeval point-index " < len(tooltips_builder_target[0].get_xdata())")
       (let* ((x (pyeval "tooltips_builder_target[0].get_xdata()"))
              (y (pyeval "tooltips_builder_target[0].get_ydata()")))
-        (setf (aref (tooltips-builder-data builder) 0) (coerce x 'list))
-        (setf (aref (tooltips-builder-data builder) 1) (coerce y 'list)))
+        (setf (aref (tooltips-builder-data builder) 0) (coerce x 'vector))
+        (setf (aref (tooltips-builder-data builder) 1) (coerce y 'vector)))
       ;; (format t "~%X and Y: ~s ~s" x y)
       )
     (pyexec "tooltips_builder_target = None")
@@ -2859,8 +2728,11 @@
 (defun set-tooltips (number &key (label nil label-provided-p) (data nil data-provided-p) (axis (gca)))
   "Provide a metadata series by number full of information to the
    tooltip-builder, then redraw the tooltips."
+  (declare (type (or (eql :add) (and fixnum (integer 0))) number))
   (when (or label-provided-p data-provided-p)
     (let ((builder (tooltips-builder axis)))
+      (when (eq number :add)
+        (setf number (tooltips-builder-count builder)))
       (when (>= number (tooltips-builder-count builder))
         (setf (tooltips-builder-count builder) (+ 1 number))
         (adjust-array (tooltips-builder-labels builder) (+ 1 number) :fill-pointer (+ 1 number) :initial-element "")
@@ -2870,13 +2742,13 @@
       (when label-provided-p
         (setf (aref (tooltips-builder-labels builder) number) label))
       (when data-provided-p
-        (setf (aref (tooltips-builder-data builder) number) data))
+        (setf (aref (tooltips-builder-data builder) number) (coerce data 'vector)))
       (rebuild-tooltips axis))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; MPL Callback
 ;;
-;; Matplotlib supports adding events and callbacks. This weld specialization allows you to register
+;; Matplotlib supports adding events and callbacks. This structure allows registering
 ;; lisp callbacks for matplotlib events.
 ;;
 ;; Example use:
@@ -2892,57 +2764,34 @@
 ;;               (format *output* "~%PICK: ~s" args)))
 
 (deftype mpl-event () '(member :pick-event :button-press-event))
-(defstruct (mpl-callback (:include weld))
+(defstruct (mpl-callback (:include moribund))
   (event nil :type mpl-event :read-only t))
 
-(defun construct-mpl-callback (canvas event lisp-object weld-id)
-  "Construct an annotation weld, returning the weld object and it's unweld function."
-  (let* ((closed-p-indirect (list nil))
-         (close-fn #'(lambda ()
-                       (unless (car closed-p-indirect)
-                         (setf (car closed-p-indirect) t)
-                         (ignore-errors (py4cl2:pyexec
-                                         (pythonize canvas)
-                                         ".mpl_disconnect("
-                                         *py-package* "weld_value(" weld-id "))"))
-                         (ignore-errors (python-unweld weld-id))))))
-    (values (make-mpl-callback
-             :id weld-id
-             :event event
-             :owner-ptr (sb-ext:make-weak-pointer lisp-object)
-             :closed-p-indirect closed-p-indirect
-             :close-fn close-fn)
-            close-fn)))
+(defun unregister-callback (mpl-callback)
+  (reap (mpl-callback-reaper mpl-callback)))
 
-(defun register* (canvas lisp-object event lisp-function)
-  (declare (type mpl-event event))
-  (declare (type (or symbol function) lisp-function))
-  (weld* (lambda (lisp-object id)
-           (construct-mpl-callback
-            canvas event lisp-object id))
-         lisp-object
-         (pythonize canvas)
-         ".mpl_connect("
-         (ecase event
-           (:pick-event "\"pick_event\"")
-           (:button-press-event "\"button_press_event\""))
-         ","
-         lisp-function ")"))
+(defun callback-active-p (mpl-callback)
+  (not (reaped-p (mpl-callback-reaper mpl-callback))))
 
-(defun register (figure event lisp-function)
+(defun register-callback (figure event callback-function)
   "Register an mpl-callback on a figure. Note that it actually is registered
    on the canvas that backs the figure, but we don't keep references to canvas...
    just figures."
   (declare (type figure figure))
-  (register*
-   (pyslot-value (figure-handle figure) "canvas")
-   figure
-   event
-   lisp-function))
-
-(defun unregister (mpl-callback)
-  (declare (type mpl-callback mpl-callback))
-  (unweld mpl-callback))
+  (declare (type mpl-event event))
+  (declare (type function callback-function))
+  (let* ((canvas (pyslot-value (figure-handle figure) "canvas"))
+         (handle (pymethod canvas "mpl_connect"
+                           (ecase event
+                             (:pick-event "pick_event")
+                             (:button-press-event "button_press_event"))
+                           callback-function))
+         (reaper (make-reaper #'(lambda ()
+                                  (ignore-errors
+                                   (pymethod canvas "mpl_disconnect" handle)))))
+         (callback (make-mpl-callback :event event :reaper reaper)))
+    (dont-fear-the-reaper callback)
+    callback))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Tooltip Integration
@@ -2959,7 +2808,7 @@
 ;;    (set-tooltips 3 :label "Bonus!" :data '(1 2 3 4 5 6 7 8 9 10))
 ;;    (disable-tooltips) ;; turn them off.
 
-(defvar *tooltip-callback-welds* (make-hash-table :weakness :key)
+(defvar *tooltip-callbacks* (make-hash-table :weakness :key)
   "References from figure -> on click callbacks.")
 
 (defun disable-tooltips (&optional (figure *current-figure*))
@@ -2967,10 +2816,10 @@
   (declare (type figure figure))
   (dolist (axis (figure-axes figure))
     (hide-tooltips axis))
-  (let ((callback  (gethash figure *tooltip-callback-welds*)))
+  (let ((callback  (gethash figure *tooltip-callbacks*)))
     (when callback
-      (unweld callback)
-      (remhash figure *tooltip-callback-welds*))))
+      (unregister-callback callback)
+      (remhash figure *tooltip-callbacks*))))
 
 (defun toggle-tooltip (axis point-number)
   "Show/hide a specific tooltip by point-number."
@@ -3007,13 +2856,13 @@
   (disable-tooltips figure)
   (dolist (axis (figure-axes figure))
     (rebuild-tooltips axis))
-  (setf (gethash figure *tooltip-callback-welds*)
-        (register *current-figure* :pick-event #'tooltip-callback-trampoline))
+  (setf (gethash figure *tooltip-callbacks*)
+        (register-callback *current-figure* :pick-event #'tooltip-callback-trampoline))
   t)
 
 (defun enable-tooltips (&optional (figure *current-figure*))
   "Enable tooltips on the figure, unless already enabled."
-  (let ((callback (gethash figure *tooltip-callback-welds*)))
+  (let ((callback (gethash figure *tooltip-callbacks*)))
     (when (or (null callback)
-              (weld-closed-p callback))
+              (not (callback-active-p callback)))
       (install-tooltips))))
