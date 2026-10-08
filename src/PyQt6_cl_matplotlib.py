@@ -1,11 +1,13 @@
 import sys
 import time
+import os
 import math
 import numpy as np
 import threading
 import weakref
 import PyQt6
 import matplotlib
+
 
 try:
     import mplcursors
@@ -24,7 +26,7 @@ from matplotlib.backend_bases import key_press_handler
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QDockWidget, QLabel, QHBoxLayout, QVBoxLayout, QWidget, QRubberBand, QLayout, QPushButton, QStyle, QFrame
 from PyQt6 import QtCore
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSocketNotifier
 from PyQt6.QtGui import QMouseEvent, QCloseEvent, QKeyEvent
 
 from collections import Counter
@@ -620,21 +622,23 @@ def delete_errorbar(errorbarContainer):
 
 counter = 1
 
+notifier = None
+
 def start_app (try_process_message):
-    global main_window
+    global main_window, notifier
     matplotlib.use("QtAgg")
     app = QtWidgets.QApplication(["MATLAB R2018b"])
     app.setQuitOnLastWindowClosed(False)
     # parameter to QApplication sets WM_CLASS, here I am matching a local
     # override to prevent focus stealing
     main_window = MainWindow()
-    timer = QTimer()
-    def process_messages():
+    def process_messages(fd):
         global counter
         counter = counter + 1
         try_process_message(blocking=False)
-    timer.timeout.connect(process_messages);
-    timer.start(1);
+    os.set_blocking(sys.stdin.fileno(), True)
+    notifier = QSocketNotifier(sys.stdin.fileno(), QSocketNotifier.Type.Read)
+    notifier.activated.connect(process_messages)
     timer_maybe_hide = QTimer()
     def maybe_hide_windows ():
         global other_windows, main_window
