@@ -1,20 +1,13 @@
 import sys
-import time
 import os
+import time
 import math
 import numpy as np
 import threading
 import weakref
 import PyQt6
 import matplotlib
-
-
-try:
-    import mplcursors
-    mplcursors_installed = True
-except ModuleNotFoundError:
-    print("mplcursors library not installed, data cursors not available, upgrade your container")
-    mplcursors_installed = False
+import matplotlib.patheffects
 
 from matplotlib.backends.backend_qtagg import FigureCanvas
 from matplotlib.backends.backend_qtagg import \
@@ -34,30 +27,21 @@ from collections import Counter
 set_active_figure = None
 close_window_callback = None
 legend_toggle_func = None
-copy_callback = lambda trace: None
-paste_callback = lambda: None
-undo_callback = lambda: None
-redo_callback = lambda: None
-delete_callback = lambda: None
 new_figure_func = lambda: None
 toggle_title_vis_callback = lambda: None
+force_redraw_func = lambda: None
 
 # We do not let pyplot manage figure activeness, as we need thread local
 # active figures (logging can occur simultaneous to user interactive plotting,
 # headless figures can be drawn at the same time, etc).
-def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, copy_callback_in, paste_callback_in, undo_callback_in, redo_callback_in, delete_callback_in, new_figure_callback_in, toggle_title_vis_callback_in):
-    global set_active_figure, close_window_callback, legend_toggle_func, copy_callback, paste_callback, undo_callback, redo_callback, toggle_title_vis_callback
-    global delete_callback, new_figure_func
+def set_callbacks (activate_figure_callback, close_window_func, legend_toggle_callback, new_figure_callback_in, toggle_title_vis_callback_in, force_redraw_func_in):
+    global set_active_figure, close_window_callback, legend_toggle_func, new_figure_func, toggle_title_vis_callback, force_redraw_func
     set_active_figure = activate_figure_callback
     close_window_callback = close_window_func
     legend_toggle_func = legend_toggle_callback
-    copy_callback = copy_callback_in
-    paste_callback = paste_callback_in
-    undo_callback = undo_callback_in
-    redo_callback = redo_callback_in
-    delete_callback = delete_callback_in
     new_figure_func = new_figure_callback_in
     toggle_title_vis_callback = toggle_title_vis_callback_in
+    force_redraw_func = force_redraw_func_in
 
 class DraggableLabel:
     """ Used for axes titles and figure suptitles, only allows us to
@@ -167,7 +151,8 @@ class InteractiveLegend(object):
             axes_handle = self.legend_handle_to_axes_handle[legend_handle]
             self.set_all_visible(legend_handle, True, 1.0 if visible else 0.2)
             self.set_all_visible(axes_handle, visible, None)
-        
+            force_redraw_func()
+
     def on_pick(self, event):
         # left button toggles visibility
         self.pending_actions = []
@@ -263,7 +248,6 @@ class MplDockWidget(QDockWidget):
         self.waiting_on_ginput = 0
         self.ginputs = []
         def update_active_figure (event):
-            self.clear_highlight()
             if not self.closed:
                 if (self.waiting_on_ginput > 0) and event.inaxes:
                     self.ginputs.append([event.xdata, event.ydata])
@@ -275,32 +259,10 @@ class MplDockWidget(QDockWidget):
         button = QPushButton("Legend")
         button_newfig = QPushButton("NewFig")
         button_titlevis = QPushButton("Title")
-        button_tooltips = QPushButton("Data cursor")
-        button_tooltips.setCheckable(True)
-        if mplcursors_installed:
-            self.toolbar.addWidget(button_tooltips)
         self.toolbar.addWidget(button_titlevis)
         self.toolbar.addWidget(button_newfig)
         self.toolbar.addWidget(button)
         global new_figure_func
-        self.cursor = None
-        self.button_tooltips = button_tooltips
-        def toggle_tooltips ():
-            if self.button_tooltips.isChecked():
-                if self.cursor:
-                    self.cursor.enabled = False
-                # Always create a new one to scan all artists again
-                self.old_cursor = self.cursor
-                self.cursor = mplcursors.cursor(self.figure, hover=False, multiple=True)
-                if self.old_cursor:
-                    self.old_cursor.visible = False
-                    for sel in self.old_cursor.selections:
-                        self.cursor.add_selection(sel, sel.artist.get_figure(), sel.artist.axes)
-                    self.old_cursor.remove()
-            if not self.button_tooltips.isChecked():
-                if self.cursor:
-                    self.cursor.enabled = False
-        button_tooltips.clicked.connect(toggle_tooltips)
         button_titlevis.clicked.connect(lambda: toggle_title_vis_callback())
         button_newfig.clicked.connect(lambda: new_figure_func())
         button.clicked.connect(lambda: legend_toggle_func(self.unique_figure_id))
@@ -314,56 +276,23 @@ class MplDockWidget(QDockWidget):
         self.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.figure.set_layout_engine(matplotlib.layout_engine.ConstrainedLayoutEngine())
         self.visibilityChanged.connect(self.on_visibility_changed)
-        self.selected_data = None
-        self.highlight_artist = None
-        self.highlight_time = time.time()
-        self.canvas.mpl_connect('pick_event', self.on_pick)
 
     def setWindowTitle(self, title):
         self.title_bar_widget.title_label.setText(title)
         super().setWindowTitle(title)
         
     def on_key_press(self, event):
-        # implement standard matplotlib keypress behavior
-        if event.key == 'ctrl+w':
-            self.close_window()
-        if event.key == 'ctrl+c' or event.key == 'ctrl+x' or event.key == 'delete':
-            if self.selected_data:
-                global copy_callback
-                copy_callback(self.selected_data)
-                self.clear_highlight()
-        if event.key == 'ctrl+v':
-            global paste_callback
-            paste_callback()  # by clicking on the right axis, liap knows which axis to paste to
-        if event.key == 'ctrl+z':
-            global undo_callback
-            undo_callback()
-        if event.key == 'ctrl+Z':
-            global redo_callback
-            redo_callback()
-        if event.key == 'delete' or event.key == 'ctrl+x':
-            global delete_callback
-            self.clear_highlight()
-            # trace_id and axis_id
-            if self.selected_data:
-                delete_callback(self.selected_data[-2], self.selected_data[-1])
         key_press_handler(event, self.canvas, self.toolbar)
 
     def make_active(self):
         set_active_figure(self.unique_figure_id, None)
 
     def mousePressEvent(self, event: QMouseEvent):
-        self.clear_highlight()
         if not self.closed:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.make_active()
 
         super().mousePressEvent(event)
-
-    def get_ginputs (self):
-        results = self.ginputs;
-        self.ginputs = [];
-        return results
         
     def clean_up_details (self):
         if not self.closed:
@@ -397,69 +326,6 @@ class MplDockWidget(QDockWidget):
         if visible:
             # print(f"{self.unique_figure_id} is now visible")
             self.make_active()
-
-    def highlight_data(self, artist, x, y):
-        self.highlight_artist, = artist.axes.plot(x,y,linewidth=10,linestyle=":",color='#90d5ff',alpha=0.7,label="_highlight")
-        self.canvas.draw_idle()
-
-    def clear_highlight(self, force=False):
-        if(force or ((time.time()-0.5) > self.highlight_time)):
-            if self.highlight_artist:
-                try:
-                    self.highlight_artist.remove();
-                    self.canvas.draw_idle()
-                except Exception:
-                    pass
-    
-    def on_pick(self, event):
-        # If in data cursor mode, no highlighting
-        if self.button_tooltips.isChecked():
-            self.clear_highlight()
-            return
-        artist = event.artist
-        if not hasattr(artist, "get_xdata"): # can be other objects that get picked (titles, labels, etc)
-            return
-        errorbar_info = False
-        # Error bar containers
-        # container[0] is the normal marker/line stuff
-        # container[0].get_xdata() is the x values of the data
-        # container[0].get_ydata() is the y values of the data
-        # container[1][0].get_xdata() are x - x-
-        # container[1][1].get_xdata() are x + x+
-        # container[1][2].get_ydata() are y - y-
-        # container[1][3].get_ydata() are y + y+
-        # container[2] are the caps of the errorbars, which we could introspect for shapes, etc.
-        for container in artist.axes.containers:
-            if isinstance(container, matplotlib.container.ErrorbarContainer) and artist in container:
-                artist = container[0] # so we save the normal line stuff
-                errorbar_info = (container[0].get_xdata() - container[1][0].get_xdata().astype(float),
-                                 container[1][1].get_xdata().astype(float) - container[0].get_xdata(),
-                                 container[0].get_ydata() - container[1][2].get_ydata().astype(float),
-                                 container[1][3].get_ydata().astype(float) - container[0].get_ydata())
-        # For errorbars on_pick gets called for the data, the error bars, and the caps
-        # line, but their data is in weird format and we don't care.  We just want to trigger
-        # on the main data line.
-        if(artist.get_xdata().dtype == object or artist.get_ydata().dtype == object):
-            return None
-        self.clear_highlight(force=True)
-        # axes_id and trace_id uniquely identify an artist
-        # If we click on a legend, it won't be in our axes so pass
-        if artist not in artist.axes.get_children():
-            return
-        trace_id = artist.axes.get_children().index(artist)
-        axes_id = artist.figure.get_axes().index(artist.axes)
-        label = artist.get_label()
-        x_data = artist.get_xdata()
-        y_data = artist.get_ydata()
-        self.highlight_data(artist, x_data, y_data)
-        self.highlight_time = time.time()
-        marker = artist.get_marker()
-        linestyle = artist.get_linestyle()
-        linewidth = artist.get_linewidth()
-        linecolor = artist.get_color()
-        markerfacecolor = artist.get_markerfacecolor()
-        markeredgecolor = artist.get_markeredgecolor()
-        self.selected_data = (x_data, y_data, label, marker, linestyle, linecolor, linewidth, markerfacecolor, markeredgecolor, errorbar_info, trace_id, axes_id)
 
 def important_children(window):
     child_objects = window.children()
@@ -622,7 +488,7 @@ def delete_errorbar(errorbarContainer):
 
 counter = 1
 
-notifier = None
+notifier = None # here so we do not get garbage collected
 
 def start_app (try_process_message):
     global main_window, notifier
@@ -636,7 +502,7 @@ def start_app (try_process_message):
         global counter
         counter = counter + 1
         try_process_message(blocking=False)
-    os.set_blocking(sys.stdin.fileno(), True)
+    os.set_blocking(sys.stdin.fileno(), False)
     notifier = QSocketNotifier(sys.stdin.fileno(), QSocketNotifier.Type.Read)
     notifier.activated.connect(process_messages)
     timer_maybe_hide = QTimer()

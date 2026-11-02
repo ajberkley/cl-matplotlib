@@ -19,7 +19,6 @@
    #:add-subplot
    #:get-figure
    #:start-loop
-   #:clear-figure-tracking
    #:*active-figures*
    #:*current-figure*
    #:set-window-style/matplotlib
@@ -126,9 +125,8 @@
    #:mpl/show-marker-types
    #:mpl/show-linestyle-types
    #:mpl/get-artist
-   #:mpl/set-annotations
    #:set-tooltips
-   #:enable-tooltips)
+   #:clear-cl-matplotlib-lisp-state)
   (:documentation "Wrapper around much of matplotlib functionality focusing on its
  use in interactive plotting and data exploration.  The focus is on drawing and
  modifying a plot so follows the 'matlab' style where one has an 'active figure' and
@@ -195,14 +193,67 @@
 (defstruct axis
   (handle nil) ;; a python handle
   (figure (make-figure) :type figure)
+  (annotations nil :type list)
+  (artists nil :type list)
   (subplot nil)
   (colorbar nil) ;; a python handle, is hard to find otherwise
-  (interactive-legends nil)) ;; stores interactive-legend handles so they don't get gc'ed
+  (interactive-legends nil)  ;; stores interactive-legend handles so they don't get gc'ed
+
+  ;; Set to TRUE (by Python) when the axis is changed in someway, via the function axis-notice-change
+  ;; which is installed as a callback. Unfortunately it's not responsive
+  ;; to all kinds of changes, like xlims and stuff, so you still have to use axis-properties-hash
+  ;; afterwards to be sure.
+  (changed-p t :type boolean))
 
 (defmethod print-object ((obj axis) stream)
   (print-unreadable-object (obj stream)
     (let ((figure (axis-figure obj)))
       (format stream "AXIS ~A of #~A '~A'" (axis-subplot obj) (figure-number figure) (figure-window-title figure)))))
+
+(defstruct artist
+  (handle nil)
+  (axis nil :type axis)
+  (annotations nil :type list)
+  (highlighted-p nil :type boolean))
+
+(defun artist-highlight (artist)
+  "Apply a highlight to the given artist. Used by the interation loop to show which lines are selected."
+  (declare (type artist artist))
+  ;; (format t "~%ADDING ARTIST HIGHLIGHT to ~s" artist)
+  (setf (artist-highlighted-p artist) t)
+  (pyexec (artist-handle artist)
+          ".set_path_effects([matplotlib.patheffects.Stroke(linewidth=5, foreground='yellow'),
+                              matplotlib.patheffects.Normal()])"))
+
+(defun artist-unhighlight (artist)
+  "Apply a highlight to the given artist. Used by the interation loop to show which lines are selected."
+  (declare (type artist artist))
+  ;; (format t "~%REMOVING ARTIST HIGHLIGHT from ~s" artist)
+  (setf (artist-highlighted-p artist) nil)
+  (pyexec (artist-handle artist)
+          ".set_path_effects([matplotlib.patheffects.Normal()])"))
+
+(defmethod print-object ((obj artist) stream)
+  (print-unreadable-object (obj stream)
+    (format stream "ARTIST on ~A" (artist-axis obj))))
+
+(defun artist-from-handle (axis python-object)
+  "Returns the artist object corresponding to the python handle on axis.
+
+   Note that artists can contain other artists. This routine is more about preventing duplicate
+   artist structures from pointing to the same thing.  If you say some bogus python-object is an
+   artist on axis, we're going to believe you and track it. That could be good or bad, depending
+   on what you're trying to do."
+  (declare (type axis axis))
+  (declare (type python-object python-object))
+  (loop :for artist :in (axis-artists axis)
+        :when (pyeval (artist-handle artist) " == " python-object)
+          :do (return-from artist-from-handle artist))
+
+  ;; Couldn't find it, so create it if it's a real child.
+  (let ((new-artist (make-artist :handle python-object :axis axis)))
+    (push new-artist (axis-artists axis))
+    new-artist))
 
 (defvar *current-figure* nil
   "Should be bound locally, except of interaction at the REPL which will use this
@@ -231,6 +282,27 @@
 
 (defun get-figure (figure-number)
   (gethash figure-number *active-figures*))
+
+(defun axis-properties-hash (axis)
+  "Computes a unique number based on the Axis properties to detect changes. First we check axis-changed-p, because
+   that's a fast check... and if that doesn't think there is a change, then we look for changes this
+   way.  It's all about knowing when we need to redraw the plot."
+  (let ((handle (axis-handle axis)))
+    (pyexec "legend_coordinates = None")
+    (ignore-errors (pyexec "legend_coordinates = " handle".get_legend()"))
+    (pyexec "legend_coordinates = legend_coordinates.get_tightbbox().bounds if legend_coordinates is not None else (0,0,0,0)")
+    (pyeval "int(("
+            "( 23 * legend_coordinates[0]) + "
+            "( 27 * legend_coordinates[1]) + "
+            "( 19 * legend_coordinates[2]) + "
+            "( 17 * legend_coordinates[3]) + "
+            "( 53 * " handle".get_ylim()[1]) + "
+            "( 7 * " handle".get_ylim()[0]) + "
+            "( 53 * " handle".get_ylim()[1]) + "
+            "( 13 * " handle".get_xlim()[0]) + "
+            "( 3 * " handle".get_xlim()[1]) + "
+            "( 11 * " handle ".get_xmargin()) +"
+            "( 19 * " handle ".get_ymargin())) * 1000000)")))
 
 (defun find-figure-with-window-title (window-title)
   (maphash (lambda (figure-number figure)
@@ -321,6 +393,10 @@
 
 (defvar *invisible-figure* nil)
 
+(defvar *new-figure-callbacks* '(install-interactivity)
+  "A list of callback functions called when a new
+   figure is created.  The callback is called with the figure structure.")
+
 (defun new-figure (&key window-title
                      figure-number (layout "tabbed")
                      (tiled-layout-request '(1 1))
@@ -361,6 +437,10 @@
     ;; Disabling the set-active feature isn't that useful because
     ;; there are callbacks from python that call this.
     (when set-active (mpl/set-figure-active fig))
+
+    (loop :for callback :in *new-figure-callbacks*
+          :do (funcall callback fig))
+
     fig))
 
 (defun mpl/figure (identifier &key (fuzzy-match nil) (layout "tabbed"))
@@ -456,6 +536,13 @@
   (find axis-handle (figure-axes fig) :key #'axis-handle :test
         (lambda (a b)
           (pyeval a " == " b))))
+
+(defun axis-notice-change (axis-handle)
+  "This is installed as a callback. This way when python thinks the axis has changed it
+   can just directly let us know."
+  (let ((axis (axis-from-axis-handle axis-handle)))
+    (when axis
+      (setf (axis-changed-p axis) t))))
 
 (defun set-active-axis-handle (axis-handle &optional (fig *current-figure*))
   "This is a callback from python"
@@ -638,6 +725,7 @@
                                             (nth 0 subplot-id) (nth 1 subplot-id) (nth 2 subplot-id)
                                             :projection projection))
                    (ax (make-axis :handle new-ax-handle :figure figure :subplot subplot-id)))
+              (pymethod new-ax-handle "add_callback" #'axis-notice-change)
               (set-new-active-axis ax)
               (draw-axis ax)
               ax)
@@ -653,6 +741,7 @@
                                    (matlab-gridspec-to-matplotlib-gridspec nrows ncols grid-desc fig-gridspec)
                                    :projection projection))
                      (new-axis (make-axis :handle ax :figure figure :subplot subplot-id)))
+                (pymethod ax "add_callback" #'axis-notice-change)
                 (set-new-active-axis new-axis)
                 (draw-axis new-axis)
                 new-axis)))))))
@@ -667,16 +756,17 @@
     (when (eq (figure-current-axis figure) ax)
       (setf (figure-current-axis figure) nil))))
 
-(defparameter *copied-trace* nil
-  "The last trace that was copied with Ctrl-c (or ctrl-x or <delete>)")
+(defparameter *copied-traces* nil
+  "The last trace(s) that were copied with Ctrl-c (or ctrl-x)")
+
 (defparameter *undo* nil
   "Stores lists of two functions, first is an undo function, second is a redo function")
 (defparameter *redo* nil
   "Stores lists of two functions, first is an undo function, second is a redo function")
 
-(defvar *copy-callback* (lambda (trace-info) (declare (ignorable trace-info)))
-  "a lambda (trace-info) to get called on ctrl-c, ctrl-x, <delete>.  trace-info will have been
- stored in *copied-trace*.  User extension point.")
+(defvar *copy-callback* (lambda (line-copies)
+                          (setf *copied-traces* line-copies))
+  "a lambda (line-copies) to get called on ctrl-c, ctrl-x.  trace-info will have been stored in *copied-traces*.  User extension point.")
 
 (defvar *paste-callback* (lambda (copied-trace) (mpl/paste-trace-to-active-figure copied-trace))
   "A lambda (trace-info) to get called on ctrl-v.  User extension point")
@@ -700,18 +790,8 @@
             x))
       x))
 
-(defun clean-up-copied-trace! (copied-trace)
-  "py4cl2 sometimes generates (vector double-float) displaced to simple-array double-float (*) of the same
- size.  This is silly (and triggers a now fixed bug in cl-binary-store).  Destructively modify copied-trace
- by seeing if we can undisplace the arrays.  copied-trace is a sequence of stuff."
-  (map-into copied-trace (lambda (x)
-                           (if (vectorp x)
-                               (undisplace-array-if-possible x)
-                               x))
-            copied-trace))
-
 (defun configure-matplotlib ()
-  (pyexec "import matplotlib; import matplotlib.pyplot as plt")
+  (pyexec "import matplotlib; import matplotlib.pyplot as plt; import mpl_toolkits")
   (pyeval "plt.ion()")
   (pyeval "matplotlib.style.use('fast')")
   (pyexec "matplotlib.rcParams['axes.formatter.limits'] = (-4, 4)")
@@ -719,6 +799,12 @@
   (pyexec (format nil "matplotlib.rcParams['savefig.directory'] = '~A'"
                   *default-pathname-defaults*))
   (pyexec "matplotlib.rcParams['axes.formatter.useoffset'] = False"))
+
+(defvar *legend-clicked-force-redraw-p* nil
+  "This variable exists because when the legend is clicked we want to know it happened so we can
+   redraw. We can pass the axis handle back and convert it to an axis object, but in testing
+   it was more reliable to just set this flag and let the interactivity handler assume the clicked
+   axis is the currently active one.")
 
 (defun start-loop ()
   "Call this to start the main gui loop"
@@ -728,15 +814,20 @@
   (py4cl2:pyexec "import PyQt6_cl_matplotlib;")
   (py4cl2:raw-py-exec/no-return "PyQt6_cl_matplotlib.start_app(try_process_message);")
   (py4cl2:pycall "PyQt6_cl_matplotlib.set_callbacks"
+                 ;; Set-active-figure
                  (lambda (unique-figure-id axis)
                    (unless (eql unique-figure-id -1)
                      (ignore-errors ;; this callback may fire before figure is built, that's OK, ignore
                       (let ((fig (mpl/set-figure-active unique-figure-id)))
                         (set-active-axis-handle axis fig))))
                    (values))
+
+                 ;; Close-window
                  (lambda (unique-figure-id)
                    (delete-figure& unique-figure-id)
                    (values))
+
+                 ;; Legend toggle
                  (lambda (unique-figure-id)
                    (mpl/set-figure-active unique-figure-id)
                    (let ((ax (figure-current-axis *current-figure*)))
@@ -748,26 +839,33 @@
                                          (if (eql (pymethod l "get_visible") t) nil t))
                                (draw-axis ax))
                              (mpl/legend))))))
-                 (lambda (trace-info)
-                   (setf trace-info (clean-up-copied-trace! trace-info))
-                   (setf *copied-trace* trace-info)
-                   (funcall *copy-callback* trace-info))
-                 (lambda ()
-                   (funcall *paste-callback* *copied-trace*))
-                 (lambda ()
-                   (funcall *undo-callback*))
-                 (lambda ()
-                   (funcall *redo-callback*))
-                 (lambda (trace-id axis-id)
-                   (funcall *delete-callback* trace-id axis-id))
+
+                 ;; New figure
                  (lambda ()
                    (mpl/figure nil))
+
+                 ;; Title visibility
                  (lambda ()
-                   (mpl/toggle-title-visibility)))
+                   (mpl/toggle-title-visibility))
+
+                 ;; Force redraw
+                 (lambda ()
+                   ;; While we can have Python tell us the changed
+                   ;; axis, that proved less reliable than just telling
+                   ;; the interactivy loop that something has changed
+                   ;; and it assuming it was the current axis.
+                   (setf *legend-clicked-force-redraw-p* t)))
+
   ;; Verify that the system is OK.
   (assert (= (pyeval "1 + 1") 2))
   ;; The above will throw an error if the no-return statement did not succeed
   (configure-matplotlib)
+  ;; Start bash script to monitor the status of the lisp process,
+  ;; and kill the python process if lisp has exited.
+  (uiop:launch-program
+   (list "./lib/cl-matplotlib/src/monitor-lisp-process.sh"
+         (write-to-string (sb-posix:getpid))
+         (write-to-string (uiop:process-info-pid (py4cl2::python-subprocess py4cl2::*python*)))))
   (setf *loop-started* t))
 
 (defun export-gaussian ()
@@ -893,21 +991,24 @@
     (validate-linestyle linestyle)
     (unless color
       (setf color (find-next-color ax)))
-    (let ((artist
-            (apply 'pymethod (axis-handle ax) "plot" x y
-                   :linestyle (or linestyle "None")
-                   :color (or color "None")
-                   :marker (or (matlab-marker-to-matplotlib-marker marker) "None")
-                   :markersize (or markersize "None")
-                   :label (make-trace-name label hide-in-legend)
-                   (append
-                    (when gapcolor (list :gapcolor gapcolor))
-                    (when picker (list :picker picker))
-                    (when linewidth (list :linewidth linewidth))
-                    (when markerfacecolor (list :markerfacecolor markerfacecolor))
-                    (when markeredgecolor (list :markeredgecolor markeredgecolor))))))
-    (draw-axis ax)
-    (values ax artist))))
+    (let* ((artist-handles
+             (apply 'pymethod (axis-handle ax) "plot" x y
+                    :linestyle (or linestyle "None")
+                    :color (or color "None")
+                    :marker (or (matlab-marker-to-matplotlib-marker marker) "None")
+                    :markersize (or markersize "None")
+                    :label (make-trace-name label hide-in-legend)
+                    (append
+                     (when gapcolor (list :gapcolor gapcolor))
+                     (when picker (list :picker picker))
+                     (when linewidth (list :linewidth linewidth))
+                     (when markerfacecolor (list :markerfacecolor markerfacecolor))
+                     (when markeredgecolor (list :markeredgecolor markeredgecolor)))))
+           ;; Plot returns a list of lines, there should be exactly 1.
+           (artist (make-artist :handle (elt artist-handles 0) :axis ax)))
+      (push artist (axis-artists ax))
+      (draw-axis ax)
+      (values ax (list artist)))))
 
 (defun is-3d-axis (ax)
   (string= (pyslot-value (axis-handle ax) "name") "3d"))
@@ -1937,18 +2038,23 @@
               (when (> d max) (setf max d))
               (when (< d min) (setf min d))))))
     (setf image-data (to-simple-array-double-float image-data 0d0 0d0))
-    (unless colormap (setf colormap "viridis"))
     (let* ((ax (gca))
            (axh (axis-handle ax))
-           (cmap (maybe-sampled-colormap-to-cmap colormap)))
+           (cmap (when colormap (maybe-sampled-colormap-to-cmap colormap)))
+           (real-min (or colorbar-min min))
+           (real-max (or colorbar-max max)))
       ;; should create the clipped colorbar mapping here...
-      (py4cl2:pymethod axh "imshow" image-data
-                       :cmap cmap :alpha alpha-stencil
-                       :extent (append x-range y-range)
-                       :aspect "auto" :origin "lower") ;; flip so matches matlab
-      (let ((real-min (or colorbar-min min))
-            (real-max (or colorbar-max max)))
-        (mpl/add-colorbar :min real-min :max real-max :cmap colormap :clip clip))
+      (apply 'py4cl2:pymethod
+             axh "imshow" image-data
+             :alpha alpha-stencil
+             :extent (append x-range y-range)
+             :aspect "auto" :origin "lower"  ;; flip so matches matlab
+             (when cmap
+               (list :norm (apply 'py4cl2:pycall "matplotlib.colors.Normalize"
+                                  :vmin real-min :vmax real-max
+                                  (when clip (list :clip t)))
+                     :cmap cmap)))
+      (mpl/add-colorbar :min real-min :max real-max :cmap colormap :clip clip :apply nil)
       (draw-axis ax))))
 
 (defun mpl/caxis (min max &key (clip t) (ax (gca)))
@@ -2232,93 +2338,6 @@
       (push f *undo*)
       (funcall (second f)))))
 
-(defun redraw-trace (copied-trace &optional (ax (gca)))
-  (destructuring-bind (x y displayname marker linestyle linecolor linewidth markerfacecolor
-                       markeredgecolor errorbar-info trace-id axes-id)
-      copied-trace
-    (declare (ignorable trace-id axes-id))
-    (if errorbar-info
-        (plot-errorbar
-         x (elt errorbar-info 0) (elt errorbar-info 1)
-         y (elt errorbar-info 2) (elt errorbar-info 3)
-         :linestyle linestyle :color linecolor :marker marker :label displayname :ax ax
-         :linewidth linewidth :markerfacecolor markerfacecolor :markeredgecolor markeredgecolor)
-        (plot-xy-data
-         x y :linestyle linestyle :color linecolor :marker marker :label displayname :ax ax
-             :linewidth linewidth :markerfacecolor markerfacecolor :markeredgecolor markeredgecolor))))
-
-(defun mpl/paste-trace-to-active-figure (copied-trace)
-  (assert copied-trace)
-  (let* ((ax (gca))
-         (artist (nth-value 1 (redraw-trace copied-trace ax))))
-    (push (list
-           (lambda ()
-             (if (pycall "isinstance" artist '|matplotlib.container.ErrorbarContainer|)
-                 (pycall "PyQt6_cl_matplotlib.delete_errorbar" artist)
-                 (pymethod (elt artist 0) "remove"))
-             (draw-axis ax))
-           (lambda ()
-             (setf artist (nth-value 1 (redraw-trace copied-trace ax)))))
-          *undo*)))
-
-(defun mpl/delete-trace (trace-id axis-id &optional (figure *current-figure*))
-  "If the commands producing the figure are played back, trace-id should be
- reliable."
-  (let* ((axis-handle (elt (pymethod (figure-handle figure) "get_axes") axis-id))
-         (ax (axis-from-axis-handle axis-handle figure))
-         (children (pymethod axis-handle "get_children"))
-         (trace *copied-trace*)) ;; right now delete is just cut
-    (pymethod (elt children trace-id) "remove")
-    (draw-axis ax)
-    (let ((temp-artist nil))
-      (push (list (lambda ()
-                    (setf temp-artist (nth-value 1 (redraw-trace trace ax))))
-                  (lambda ()
-                    (pymethod (elt temp-artist 0) "remove")
-                    (draw-axis ax)))
-          *undo*))))
-
-(defvar *headless-lock* (sb-thread:make-mutex))
-
-(defvar *headless-matplotlib* nil
-  "A python instance running a headless matplotlib, for generating thumbnails, etc.")
-
-(defun stop-headless-matplotlib ()
-  (py4cl2:pystop *headless-matplotlib*)
-  (setf *headless-matplotlib* nil))
-
-(defun mpl/run-headless (thunk)
-  (sb-thread:with-recursive-lock (*headless-lock*)
-    (unless (and *headless-matplotlib* (py4cl2:python-alive-p *headless-matplotlib*))
-      (setf *headless-matplotlib* (py4cl2:pystart (py4cl2:config-var 'py4cl2:pycmd) nil))
-      (let ((py4cl2::*python* *headless-matplotlib*))
-        (import-all-code)
-        (py4cl2:pyexec "import headless_matplotlib; import matplotlib; import PyQt6_cl_matplotlib")
-        (configure-matplotlib)
-        (py4cl2:pyeval "matplotlib.use('Agg')")))
-    (let ((py4cl2::*python* *headless-matplotlib*)
-          (*current-figure* *current-figure*)
-          (*active-figures* (make-hash-table :test 'equal)))
-      (prog1
-          (let ((*invisible-figure* t))
-            (funcall thunk))
-        (py4cl2:pycall "headless_matplotlib.closeallfigs")))))
-
-(defun mpl/set-annotations (artist annotations)
-  "Takes an array of strings of the same length as elements drawn in the artist."
-  (py4cl2:pyexec "PyQt6_cl_matplotlib.annotations_map[" artist "] = " annotations))
-
-(defun mpl/get-artist (&key (type '|matplotlib.lines.Line2D|))
-  "Returns the latest artist of TYPE drawn on axis"
-  (let* ((ax (gca))
-         (children (pymethod (axis-handle ax) "get_children")))
-    (loop for child across (reverse children)
-          for is-line = (pycall "isinstance" child type)
-          until is-line
-          finally
-             (assert is-line nil "Could not find data series to label")
-             (return child))))
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Reapers and Moribund objects
 ;;
@@ -2368,34 +2387,180 @@
   (sb-ext:finalize moribund #'(lambda () (reap reaper))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; MPL Callback
+;;
+;; Matplotlib supports adding events and callbacks. This structure allows registering
+;; lisp callbacks for matplotlib events.
+;;
+;; Example use:
+;;
+;; (defvar *output* *standard-output*)
+;; (register *current-figure*
+;;           :button-press-event
+;;           #'(lambda (&rest args)
+;;               (format *output* "~%BUTTON PRESS: ~s" args)))
+;; (register *current-figure*
+;;           :pick-event
+;;           #'(lambda (&rest args)
+;;               (format *output* "~%PICK: ~s" args)))
+
+(deftype mpl-event ()
+  '(member
+    :pick-event
+    :button-press-event
+    :button-release-event
+    :motion-notify-event
+    :key-press-event
+    :key-release-event
+    :axes-enter-event))
+
+(defstruct (mpl-callback (:include moribund))
+  (cid nil :type fixnum :read-only t)
+  (event nil :type mpl-event :read-only t)
+  (lisp-callback nil :type function :read-only t)
+  (python-callback0 nil :type python-object :read-only t)
+  (python-callback1 nil :type python-object :read-only t))
+
+(defun unregister-callback (mpl-callback)
+  (reap (mpl-callback-reaper mpl-callback)))
+
+(defun callback-active-p (mpl-callback)
+  (not (reaped-p (mpl-callback-reaper mpl-callback))))
+
+(defun register-callback (figure event callback-function)
+  "Register an mpl-callback on a figure. Note that it actually is registered
+   on the canvas that backs the figure, but we don't keep references to canvas...
+   just figures."
+  (declare (type figure figure))
+  (declare (type mpl-event event))
+  (declare (type function callback-function))
+  (let* ((canvas (pyslot-value (figure-handle figure) "canvas"))
+         ;; Do this so we keep a reference to this handle so it doesn't GC.
+         (python-callback0 (pyeval callback-function))
+         ;; Then wrap that in a lambda and keep a reference to that so it doesn't GC.
+         (python-callback1 (pyeval "lambda ev: " python-callback0 "(PyQt6_cl_matplotlib.time.time(), ev)"))
+         (cid (pymethod canvas "mpl_connect"
+                        (ecase event
+                          (:pick-event "pick_event")
+                          (:button-press-event "button_press_event")
+                          (:button-release-event "button_release_event")
+                          (:motion-notify-event "motion_notify_event")
+                          (:key-press-event "key_press_event")
+                          (:key-release-event "key_release_event")
+                          (:axes-enter-event "axes_enter_event"))
+                        ;; Inside the Python environment, Attach the current time to the event.
+                        ;; If we get the time on the Lisp side our resolution is limited to
+                        ;; polling rate our python<->lisp communication loop
+                        ;; communicates.  This helps, but it isn't PERFECT, and QT doesn't
+                        ;; give us anything better, so we're hosed.
+                        ;;
+                        ;; Basically, when there is lots to draw, the timing becomes so inaccurate
+                        ;; when drawing that we can't tell short clicks from long clicks. Double
+                        ;; clicks still seem to be reliably distinguished.
+                        ;;
+                        ;; In practice that means that if your screen is BUSY all short clicks will
+                        ;; become long clicks. So you should probably set up your actions so that
+                        ;; long clicks on objects can make the screen less busy.
+                        python-callback1))
+         (reaper (make-reaper #'(lambda ()
+                                  (ignore-errors
+                                   (pymethod canvas "mpl_disconnect" cid)))))
+         (callback (make-mpl-callback
+                    :event event
+                    :reaper reaper
+                    :cid cid
+                    :lisp-callback callback-function
+                    :python-callback0 python-callback0
+                    :python-callback1 python-callback1)))
+    (dont-fear-the-reaper callback)
+    callback))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Annotations
 ;;
 ;; An annotation is a moribund structure. It lets you draw arbitrarily on the plot.  One use of
 ;; this is implementing callout annotations that are used for tooltips.
 
 (defstruct (annotation (:include moribund))
-  (handle nil :type python-object :read-only t))
+  "An annotation is a handle to a matplotlib annotation object and an optional interaction-update-fn
+   which can be used to update the annotation depending on the user interaction state.  If supplied
+   the interaction object will call it with both the annotation and an interaction-state structure."
+  (handle nil :type python-object :read-only t)
+  (axis nil :type axis :read-only t)
+  ;; Some annotations are tooltips which conceptually belong to an artist. We can fill this out
+  ;; to provide more information on the Lisp side.
+  ;; When an annotation has an artist, it's added to both the axis-annotations AND artist-annotations.
+  (artist nil :type (or null artist) :read-only t)
+  (interaction-update-fn nil :type (or null symbol function) :read-only t))
 
-(defun remove-annotation (annotation)
-  (reap (annotation-reaper annotation)))
+(defmethod print-object ((obj annotation) stream)
+  (print-unreadable-object (obj stream)
+    (format stream "ANNOTATION on ~A" (annotation-axis obj))))
+
+(defun annotation-screen-coords (annotation)
+  "Returns the screen coordinates of the annotation. (xmin xmax ymin ymax). If the annotation
+   is closed returns (60000 60001 60000 60001), which should be way off screen."
+  (cond ((annotation-closed-p annotation)
+         '(60000 60000 60001 60001))
+        (t
+         (pyexec "ann_xy_cmp_temp = None")
+         (ignore-errors (pyexec "ann_xy_cmp_temp = " (annotation-handle annotation) ".get_bbox_patch().get_extents()"))
+         (prog1 (pyeval "(60000, 60000, 60001, 60001) if ann_xy_cmp_temp is None else (ann_xy_cmp_temp.xmin, ann_xy_cmp_temp.xmax, ann_xy_cmp_temp.ymin, ann_xy_cmp_temp.ymax)")
+           (pyexec "ann_xy_cmp_temp = None")))))
+
+(defvar *remove-annotation-callback* nil
+  "This callback is setup when the interactivity thread is setup.  When it's in place
+   we remove annotations with this and it will animate them out.  If it's not
+   in place, the annotate will just be removed.")
+
+(defun remove-annotation (annotation
+                          &aux
+                            (axis (annotation-axis annotation))
+                            (artist (annotation-artist annotation)))
+  (flet ((detach-and-trash-annotation ()
+           (when axis
+             (setf (axis-annotations axis)
+                   (remove annotation (axis-annotations axis))))
+           (when artist
+             (setf (artist-annotations artist)
+                   (remove annotation (artist-annotations artist))))
+           (reap (annotation-reaper annotation))))
+    (if (and *remove-annotation-callback*
+             (not (annotation-closed-p annotation)))
+        (funcall *remove-annotation-callback* annotation
+                 #'detach-and-trash-annotation)
+        (detach-and-trash-annotation))))
 
 (defun annotation-closed-p (annotation)
   (reaped-p (annotation-reaper annotation)))
 
+(defvar *register-annotation-callback* nil
+  "This callback is setup when the interactivity thread is setup.  When it's in place
+   we register annotations with it and it will animate them open..  If it's not
+   in place, the annotate function will just draw itself.")
+
 (defun annotate (axis text xy
-                 &key xytext
+                 &key artist
+                   xytext
                    horizontal-alignment
                    vertical-alignment
                    xycoords
                    textcoords
                    z-order
                    b-box
-                   arrow-properties)
-  "Place an annotation on an axis. Returns an annotation structure."
+                   arrow-properties
+                   interaction-update-fn)
+  "Place an annotation on an axis. Returns an annotation structure. The annotation will be shown when the axis is redrawn."
   (declare (type string text))
   (declare (type cons xy))
-  (assert (numberp (car xy)))
+  (declare (type axis axis))
+  (declare (type (or null artist) artist))
+  (declare (type (or null function symbol) interaction-update-fn))
+  (assert (or (typep (car xy) 'py4cl2::python-object) ;; a number, or a datetime object
+              (numberp (car xy))))
   (assert (numberp (cadr xy)))
+  (when artist
+    (assert (eq axis (artist-axis artist))))
   (let* ((handle (apply #'pymethod (axis-handle axis)
                         "annotate"
                         text
@@ -2415,17 +2580,2489 @@
                   #'(lambda ()
                       (ignore-errors
                        (pymethod handle "remove")
-                       (draw-axis axis)))))
-         (annotation (make-annotation :handle handle :reaper reaper)))
+                       ;; We don't want to automatically trigger a redraw.
+                       ;; That should be a decision of higher level code.
+                       ;; (draw-axis axis)
+                       ))))
+         (annotation (make-annotation :handle handle :axis axis :artist artist :reaper reaper :interaction-update-fn interaction-update-fn)))
     (dont-fear-the-reaper annotation)
-    (draw-axis axis)
+    (when artist
+      (push annotation (artist-annotations artist)))
+    (push annotation (axis-annotations axis))
+
+    ;; If we have an interaction handler, by registering with it
+    ;; we should get drawn.  If we don't, just draw ourselves.
+    (if *register-annotation-callback*
+        (funcall *register-annotation-callback* annotation nil)
+        (pyexec (annotation-handle annotation) ".draw("
+                (figure-handle (axis-figure (annotation-axis annotation)))
+                ".canvas.get_renderer())"))
+
     annotation))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Tooltip
+;;
+;; Tooltips are user specified callouts associated with the points of a line. This subsystem tracks
+;; the set of tooltips for an artist. They're in a weakly keyed hash table on the artist object of
+;; an axis.
+;;
+;; Example usage:
+;;
+;;  (plot-random-points)
+;;
+;;  ;; Update text and show:
+;;  (setf (tooltip (gca) 3) "Here is a point!")
+;;  ;; Hide it
+;;  (hide-tooltip (gca) 3)
+;;  ;; Show it again
+;;  (tooltip (gca) 3)
+
+(defvar *tooltips* (make-hash-table :weakness :key)
+  "A weakly keyed hashtable of axis / artist -> tooltips structure.")
+(defstruct tooltips
+  "This is a state tracking object. They're weakly keyed on an artist
+   via the *tooltips* variable.
+
+   Strings is a vector of string or nil.  NIL if no tooltip was defined."
+  (strings #() :type simple-vector :read-only nil)
+  (callouts #() :type simple-vector :read-only nil))
+
+(defun artist-num-points (artist)
+  (pyeval "len(" (artist-handle artist) ".get_xdata()) if isinstance(" (artist-handle artist) ", matplotlib.lines.Line2D) "
+          "else ("(artist-handle artist)".get_size()[0] * " (artist-handle artist) ".get_size()[1] if isinstance(" (artist-handle artist) ", matplotlib.image.AxesImage) "
+          "else 0)"))
+
+(flet ((resize-vector (vector num-points initial-element)
+         (let ((new (make-array num-points :initial-element initial-element)))
+           (replace new vector)
+           new)))
+  (defun resize-tooltips (tooltips num-points)
+    (declare (type tooltips tooltips))
+    (with-slots (strings callouts) tooltips
+      (when (< (length strings) num-points)
+        (setf strings (resize-vector strings num-points nil))
+        (loop :for i :from num-points :below (length callouts)
+              :when (aref callouts i)
+                :do (remove-annotation (aref callouts i)))
+        (setf callouts (resize-vector callouts num-points nil))))
+    tooltips))
+
+(defun tooltips (artist)
+  "Internal use mainly, returns the tooltips structure after resizing it to
+   match the data points."
+  (let ((tooltips (or (gethash artist *tooltips*)
+                      (setf (gethash artist *tooltips*) (make-tooltips)))))
+    (resize-tooltips tooltips (artist-num-points artist))
+    tooltips))
+
+(defun nice-tooltip-location (artist point-index)
+  "Utility function, Looks at the tooltip data and decides were to place it.
+   Returns (values (x1 y1) (x2 y2) horizontal-alignment vertical-alignment)
+   Assumes that we're using :textcoords \"offset points\" in the callout style
+   so that the text location is screen-points relative to where (x1 y1) are.
+
+   (x1 y1) are the place the tooltip points (e.g. the data point)
+   and (x2 y2) are the location of the callout center where the text is. The
+   text will flow from that point base on the alignment."
+  (declare (type artist artist)
+           (type (or (double-float 0d0) (unsigned-byte 32)) point-index))
+  (let ((x 0.0d0)
+        (y 0.0d0)
+        (num-points (artist-num-points artist)))
+    (when (< -1 point-index num-points)
+      (let ((type (python-object-type (artist-handle artist))))
+        (cond ((string-equal type "<class 'matplotlib.lines.Line2D'>")
+               (etypecase point-index
+                 (double-float
+                  (multiple-value-bind (int fractal) (truncate point-index)
+                    (cond ((zerop fractal) ;; This path taken by date-time axis.
+                           (setf x (pyeval (artist-handle artist) ".get_xdata()[" int "]"))
+                           (setf y (pyeval (artist-handle artist) ".get_ydata()[" int "]")))
+                          (t ;; This path taken by numeric axis.
+                           (setf x (pyeval "(" (artist-handle artist) ".get_xdata()[" int "] * (1.0 - " fractal ")) + (" (artist-handle artist) ".get_xdata()[" (+ int 1) "] * " fractal ")"))
+                           (setf y (pyeval "(" (artist-handle artist) ".get_ydata()[" int "] * (1.0 - " fractal ")) + (" (artist-handle artist) ".get_ydata()[" (+ int 1) "] * " fractal ")"))))))
+                 (integer
+                  (setf x (pyeval (artist-handle artist) ".get_xdata()[" point-index "]"))
+                  (setf y (pyeval (artist-handle artist) ".get_ydata()[" point-index "]"))))
+               (values
+                (list x y)
+                (list 12 12) ;; Offset in points.
+                "left"
+                "bottom"))
+              ((string-equal type "<class 'matplotlib.image.AxesImage'>")
+               (let* ((extent (pymethod (artist-handle artist) "get_extent"))
+                      (xmin (aref extent 0))
+                      (xmax (aref extent 1))
+                      (ymin (aref extent 2))
+                      (ymax (aref extent 3))
+                      (array (with-remote-objects (pymethod (artist-handle artist) "get_array")))
+                      (array-dim-1 (pyeval array ".shape[1]")))
+                 (when (string-equal "upper" (pyslot-value (artist-handle artist) "origin"))
+                   (let ((temp ymin))
+                     (setf ymin ymax)
+                     (setf ymax temp)))
+                 (multiple-value-bind (y x) (truncate (truncate point-index) array-dim-1)
+                   (values
+                    (list (+ (/ 1
+                                (+ 1 (- xmax xmin)))
+                             (* (/ x (+ 1 (- xmax xmin))) (- xmax xmin)) xmin)
+                          (+ (/ 1
+                                (+ 1 (- ymax ymin)))
+                             (* (/ y (+ 1 (- ymax ymin))) (- ymax ymin)) ymin))
+                    (list 12 12)
+                    "left"
+                    "bottom"))))
+              (t (values (list 0d0 0d0)
+                         (list 12 12)
+                         "left"
+                         "bottom")))))))
+
+(defun tooltip-visible-p (artist point-index)
+  "Returns T if the tooltip is visible, nil otherwise."
+  (let ((tooltips (tooltips artist)))
+    (when (<= 0 point-index (- (length (tooltips-strings tooltips)) 1))
+      (let ((existing (aref (tooltips-callouts tooltips) point-index)))
+        (and existing
+             (not (annotation-closed-p existing)))))))
+
+(defun tooltip-defined-p (artist point-index)
+  "Returns T if the tooltip is defined (it's string is not nil)."
+  (let ((tooltips (tooltips artist)))
+    (when (<= 0 point-index (- (length (tooltips-strings tooltips)) 1))
+      (not (null (aref (tooltips-strings tooltips) point-index))))))
+
+(defun show-tooltip (artist point-index)
+  "Shows (if necessary) and returns the tooltip for the specified point-index."
+  (declare (type artist artist)
+           (type (unsigned-byte 32) point-index))
+  (let ((tooltips (tooltips artist)))
+    ;; Cap the users point to the acceptable range.
+    (assert (<= 0 point-index (- (length (tooltips-strings tooltips)) 1))
+            nil "Tooltip index out of range. You gave ~d, but the range is ~d to ~d (inclusive)."
+            point-index
+            0 (- (length (tooltips-strings tooltips)) 1))
+
+    (let ((existing (aref (tooltips-callouts tooltips) point-index)))
+      (when (or (null existing)
+                (annotation-closed-p existing))
+          (let ((string (aref (tooltips-strings tooltips) point-index)))
+            (when string
+              (assert (stringp string))
+              (multiple-value-bind (xy xytext horizontal-alignment vertical-alignment)
+                  (nice-tooltip-location artist point-index)
+                (when (zerop (length string))
+                  ;; At least one space. An empty string doesn't render
+                  ;; and is very confusing.
+                  (setf string " "))
+                (setf existing
+                      (callout (artist-axis artist) string
+                               xy :artist artist :xytext xytext
+                               :horizontal-alignment horizontal-alignment
+                               :vertical-alignment vertical-alignment))))))
+      (setf (aref (tooltips-callouts tooltips) point-index) existing)
+      existing)))
+
+(defun set-tooltip-text (artist point-index text)
+  "Set a tooltips text, then redraws the tooltip. Supports setf."
+  (declare (type string text))
+  (declare (type artist artist))
+  (declare (type (unsigned-byte 32) point-index))
+  (let ((tooltips (tooltips artist)))
+    (assert (<= 0 point-index (- (length (tooltips-strings tooltips)) 1))
+            nil "Tooltip index out of range. You gave ~d, but the range is ~d to ~d (inclusive)."
+            point-index
+            0 (- (length (tooltips-strings tooltips)) 1))
+    (setf (aref (tooltips-strings tooltips) point-index) text)
+    (let ((existing (aref (tooltips-callouts tooltips) point-index)))
+      (when existing
+        (remove-annotation existing)))
+    (show-tooltip artist point-index)))
+
+(defun hide-tooltip (artist point-index)
+  "Hide a specific tooltip by point-index."
+  (declare (type artist artist)
+           (type (unsigned-byte 32) point-index))
+  (let ((tooltips (tooltips artist)))
+    (when (<= 0 point-index (- (length (tooltips-callouts tooltips)) 1))
+      (let ((existing (aref (tooltips-callouts tooltips) point-index)))
+        (when existing
+          (setf (aref (tooltips-callouts tooltips) point-index) nil)
+          (remove-annotation existing))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Line Copying
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(deftype rgb-triplet () 'list)
+(defstruct line-copy
+  "Represents a lisp side copy of a line from matplotlib. It's used to store the line
+   temporarily, for cut/copy/paste, for undo/redo, and for logged plots."
+  (x-data nil :type vector :read-only t)
+  (y-data nil :type vector :read-only t)
+  (label nil :type string :read-only t)
+  (marker nil :type string :read-only t)
+  (linestyle nil :type string :read-only t)
+  (linecolor nil :type (or rgb-triplet string) :read-only t)
+  (linewidth nil :type double-float :read-only t)
+  (markerfacecolor nil :type (or rgb-triplet string) :read-only t)
+  (markeredgecolor nil :type (or rgb-triplet string) :read-only t)
+  (errorbar-info nil :type list :read-only t)
+  (trace-id nil :type (unsigned-byte 32) :read-only t)
+  (axis-id nil :type (unsigned-byte 32) :read-only t)
+  ;; Tooltips is a list of strings. It should be either empty or
+  ;; have 1 string element per data point.
+  (tooltips nil :type list :read-only t))
+
+(defun make-line-copy-from-artist (artist)
+  (declare (type artist artist))
+  (destructuring-bind (trace-id axis-id label x-data y-data marker linestyle linewidth linecolor markerfacecolor markeredgecolor)
+      (let ((handle (artist-handle artist)))
+        (pyeval "("
+                handle".axes.get_children().index("handle"),"
+                handle".figure.get_axes().index("handle".axes),"
+                handle".get_label(),"
+                handle".get_xdata(),"
+                handle".get_ydata(),"
+                handle".get_marker(),"
+                handle".get_linestyle(),"
+                handle".get_linewidth(),"
+                handle".get_color(),"
+                handle".get_markerfacecolor(),"
+                handle".get_markeredgecolor()"
+                ")"))
+    (let ((tooltips (coerce (tooltips-strings (tooltips artist)) 'list)))
+      (make-line-copy
+       :axis-id axis-id
+       :trace-id trace-id
+       :label label
+       :x-data (undisplace-array-if-possible x-data)
+       :y-data (undisplace-array-if-possible y-data)
+       :marker marker
+       :linestyle linestyle
+       :linewidth linewidth
+       :linecolor linecolor
+       :markerfacecolor markerfacecolor
+       :markeredgecolor markeredgecolor
+       :tooltips tooltips))))
+
+(defun redraw-trace (copied-trace &optional (ax (gca)))
+  (declare (type line-copy copied-trace))
+  (with-accessors ((x line-copy-x-data)
+                   (y line-copy-y-data)
+                   (displayname line-copy-label)
+                   (marker line-copy-marker)
+                   (linestyle line-copy-linestyle)
+                   (linecolor line-copy-linecolor)
+                   (linewidth line-copy-linewidth)
+                   (markerfacecolor line-copy-markerfacecolor)
+                   (markeredgecolor line-copy-markeredgecolor)
+                   (errorbar-info line-copy-errorbar-info)
+                   (tooltip-strings line-copy-tooltips)) copied-trace
+    (if errorbar-info
+        (plot-errorbar
+         x (elt errorbar-info 0) (elt errorbar-info 1)
+         y (elt errorbar-info 2) (elt errorbar-info 3)
+         :linestyle linestyle :color linecolor :marker marker :label displayname :ax ax
+         :linewidth linewidth :markerfacecolor markerfacecolor :markeredgecolor markeredgecolor)
+        (multiple-value-bind (axis artists)
+            (plot-xy-data
+             x y :linestyle linestyle :color linecolor :marker marker :label displayname :ax ax
+             :linewidth linewidth :markerfacecolor markerfacecolor :markeredgecolor markeredgecolor)
+          (replace (tooltips-strings (tooltips (first artists))) tooltip-strings)
+          (values axis artists)))))
+
+(defun mpl/paste-trace-to-active-figure (copied-trace)
+  (declare (type line-copy copied-trace))
+  (let* ((ax (gca))
+         (artist (nth-value 1 (redraw-trace copied-trace ax))))
+    (push (list
+           (lambda ()
+             (if (pycall "isinstance" artist '|matplotlib.container.ErrorbarContainer|)
+                 (pycall "PyQt6_cl_matplotlib.delete_errorbar" artist)
+                 (pymethod (artist-handle (elt artist 0)) "remove"))
+             (draw-axis ax))
+           (lambda ()
+             (setf artist (nth-value 1 (redraw-trace copied-trace ax)))))
+          *undo*)))
+
+(defun delete-artist (artist)
+  "Delete a trace (e.g. an artist, a line). Supports undo and redo."
+  (declare (type artist artist))
+  (let* ((ax (artist-axis artist))
+         (copy (make-line-copy-from-artist artist)))
+    (loop :for annotation :in (artist-annotations artist)
+          :do (remove-annotation annotation))
+    (pymethod (artist-handle artist) "remove")
+    (setf (axis-changed-p ax) t)
+    (let ((temp-artist nil))
+      (push (list (lambda ()
+                    (setf temp-artist (nth-value 1 (redraw-trace copy ax))))
+                  (lambda ()
+                    (pymethod (artist-handle (elt temp-artist 0)) "remove")
+                    (setf (axis-changed-p ax) t)))
+          *undo*))))
+
+(defun trace-id-artist-id-to-artist (trace-id axis-id &optional (figure *current-figure*))
+  (let* ((axis-handle (elt (pymethod (figure-handle figure) "get_axes") axis-id))
+         (axis (axis-from-axis-handle axis-handle figure))
+         (artist-handle (pyeval axis-handle "get_children[" trace-id "]")))
+    (artist-from-handle axis artist-handle)))
+
+(defun mpl/delete-trace (trace-id axis-id &optional (figure *current-figure*))
+  (delete-artist
+   (trace-id-artist-id-to-artist trace-id axis-id figure)))
+
+(defvar *headless-lock* (sb-thread:make-mutex))
+
+(defvar *headless-matplotlib* nil
+  "A python instance running a headless matplotlib, for generating thumbnails, etc.")
+
+(defun stop-headless-matplotlib ()
+  (py4cl2:pystop *headless-matplotlib*)
+  (setf *headless-matplotlib* nil))
+
+(defun mpl/run-headless (thunk)
+  (sb-thread:with-recursive-lock (*headless-lock*)
+    (unless (and *headless-matplotlib* (py4cl2:python-alive-p *headless-matplotlib*))
+      (setf *headless-matplotlib* (py4cl2:pystart (py4cl2:config-var 'py4cl2:pycmd) nil))
+      (let ((py4cl2::*python* *headless-matplotlib*))
+        (import-all-code)
+        (py4cl2:pyexec "import headless_matplotlib; import matplotlib; import PyQt6_cl_matplotlib")
+        (configure-matplotlib)
+        (py4cl2:pyeval "matplotlib.use('Agg')")))
+    (let ((py4cl2::*python* *headless-matplotlib*)
+          (*current-figure* *current-figure*)
+          (*active-figures* (make-hash-table :test 'equal)))
+      (prog1
+          (let ((*invisible-figure* t))
+            (funcall thunk))
+        (py4cl2:pycall "headless_matplotlib.closeallfigs")))))
+
+(defun mpl/get-artist (&key (ax (gca)) (types '(|matplotlib.lines.Line2D|)))
+  "Returns the latest artist of TYPE drawn on axis"
+  (let ((children (pymethod (axis-handle ax) "get_children")))
+    (loop for child across (reverse children)
+          for matched-type = (find-if #'(lambda (type)
+                                          (pycall "isinstance" child type)) types)
+          until matched-type
+          finally
+             (assert matched-type nil "Could not find data series to label")
+             (return (values (artist-from-handle ax child)
+                             matched-type)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Picking points
+;;
+;; This code was adapted from mplcursors library; Routines to find the nearest point or line to
+;; given screen coordinates (e.g. mouse location where you clicked). These routines are later used
+;; to place callouts on the clicked points and lines.
+;;
+;; The two 'interface' functions you want are:
+;;   1. compute-nearest-point (artist, screenx, screeny) => selection or nil
+;;   2. compute-nearest-line (artist, screenx, screeny) => selection or nil
+
+(defstruct selection
+  "Return value of compute-nearest-line and compute-nearest-point. It holds the artist,
+   the screen-x and screen-y of the selected point (or point on the line), the index of the point in
+   the artist (which will lie between integers in the case of selections on line segments), the domain
+   coordinates (which may have more than two dimensions) and the distance (in screen screenspace)
+   from the screen-x and screen-y here and the search point."
+  (artist nil :type artist :read-only t)
+  ;; X, Y of where the search was triggered from
+  (click-screen-x nil :type double-float :read-only t)
+  (click-screen-y nil :type double-float :read-only t)
+
+  ;; X, Y of the selected point or point on the line.
+  (point-screen-x nil :type double-float :read-only t)
+  (point-screen-y nil :type double-float :read-only t)
+
+  ;; Point index number in the artist, which will be a double float if the selection is a line
+  ;; projection.
+  (point-index nil :type (or (and fixnum (integer 0)) double-float) :read-only t)
+
+  ;; Coordinates of the point (or projection on the line) in the data domain.
+  (domain-coordinates nil :type vector :read-only t)
+
+  ;; Distance (in screen space) between the click and the selection point.
+  (distance nil :type double-float :read-only t))
+
+(defun points-visible-p (artist)
+  "Returns T if the artist is drawing visible points"
+  (not (member (ignore-errors (pymethod artist "get_marker")) '("None" "none" " " "" nil) :test #'equalp)))
+
+(defun lines-visible-p (artist)
+  "Returns T if the artist is drawing visible lines."
+  (not (member (ignore-errors (pymethod artist "get_linestyle")) '("None" "none" " " "" nil) :test #'equalp)))
+
+(defun image-visible-p (artist)
+  "Returns T if the artist is drawing visible images."
+  (declare (ignore artist))
+  t)
+
+(defun untransform (orig-xy screen-xy axis)
+  "Return data coordinates to place an annotation at screen coordinates
+   *screen_xy* in axes *ax*.
+
+   orig_xy are the original coordinates as stored by the artist; they are
+   transformed to screen_xy by whatever transform the artist uses.
+
+   If the artist uses ``ax.transData``, just return orig_xy, otherwise apply
+   ``ax.transData.inverse()`` to *screen_xy*.  (The first case is more
+   accurate than always applying ``ax.transData.inverse()``."
+  (with-remote-objects*
+    (let* ((tr-xy (pymethod axis "transData.transform" orig-xy))
+           (invalid-p (pyeval "((" tr-xy " == " screen-xy ") | numpy.isnan(" tr-xy ") & numpy.isnan(" screen-xy ")).all()")))
+      (if invalid-p
+          orig-xy
+          (pymethod axis "transData.inverted().transform" screen-xy)))))
+
+(defun compute-nearest-point/line2D (axis artist screen-x screen-y)
+  (let* ((xy (with-remote-objects (pyeval screen-x ", " screen-y)))
+         (data-xy (with-remote-objects (pymethod artist "get_xydata")))
+         (data-screen-xy (with-remote-objects (pymethod artist "get_transform().transform" data-xy))))
+    (let* ((ds (with-remote-objects (pyeval "numpy.hypot(*(" xy " - " data-screen-xy ").T)")))
+           (min (pyeval "numpy.nanargmin( " ds ")"))
+           (domain-coordinates
+             (untransform (pyeval data-xy "[" min "]")
+                          (pyeval data-screen-xy "[" min "]")
+                          (pyslot-value artist "axes"))))
+      (make-selection
+       :artist (artist-from-handle axis artist)
+       :click-screen-x screen-x
+       :click-screen-y screen-y
+       :point-screen-x (pyeval data-screen-xy "[ "min" ][0]")
+       :point-screen-y (pyeval data-screen-xy "[ "min" ][1]")
+       :point-index min
+       :domain-coordinates domain-coordinates
+       :distance (pyeval ds "[" min "]")))))
+
+(defun compute-nearest-point (axis artist screen-x screen-y)
+  "Returns a selection object, nearest point to x y screen coordinates. Note
+   that this routine doesn't care about point visibility.  If you don't want to be able to click
+   on invisible points, guard this with points-visible-p."
+  (declare (type python-object artist)
+           (type double-float screen-x screen-y))
+  (let ((type (python-object-type artist)))
+    (cond ((string-equal type "<class 'matplotlib.lines.Line2D'>")
+           (compute-nearest-point/line2D axis artist screen-x screen-y))
+          ((string-equal type "<class 'matplotlib.image.AxesImage'>")
+           ;; AxesImage doesn't have points.
+           nil)
+          (t (warn "compute-nearest-point not implemented for ~s" type)
+             nil))))
+
+(defun compute-projection-pick (axis artist path screen-x screen-y)
+  "Project screen-x and screen-y onto path to obtain a selection for the artist.
+
+   Path is first transformed to screet coordinates using the artist
+   transform, and the target of the returned `Selection` is transformed
+   back to data coordinates using the artist *axes* inverse transform.  The
+   `Selection` `index` is returned as a float.  This function returns ``None``
+   for degenerate inputs.
+
+   The caller is responsible for converting the index to the proper class if
+   needed."
+  (declare (optimize debug))
+  (let* ((xy (with-remote-objects (pyeval "[" screen-x ", " screen-y "]")))
+         (transform (with-remote-objects (pymethod artist "get_transform().frozen")))
+         (tpath ;; cleaned only handles affine transformations.
+           (with-remote-objects
+             (pyeval "(" path ".cleaned(" transform ") if " transform ".is_affine else " transform ".transform_path(" path ").cleaned())")))
+         ;;  `cleaned` should return a path where the first element is `MOVETO`, the
+         ;;  following are `LINETO` or `CLOSEPOLY`, and the last one is `STOP`, i.e.
+         ;;      codes = path.codes
+         ;;      assert (codes[0], codes[-1]) == (path.MOVETO, path.STOP)
+         ;;      assert numpy.isin(codes[1:-1], [path.LINETO, path.CLOSEPOLY]).all()
+         (vertices (with-remote-objects (pyeval tpath ".vertices[:-1]")))
+         (codes (with-remote-objects (pyeval tpath ".codes[:-1]")))
+         (mt_idxs (with-remote-objects (pyeval "(" codes " == " tpath ".MOVETO).nonzero()[0]")))
+         (cp_idxs (with-remote-objects (pyeval "(" codes " == " tpath ".CLOSEPOLY).nonzero()[0]"))))
+
+    ;; For a close poly command, update the vertices to be the prior vertex?
+    (pyexec vertices "[ " cp_idxs "] = " vertices "[ " mt_idxs "[ " mt_idxs ".searchsorted("cp_idxs") - 1]]")
+
+    (let* (;; Unit vectors for each segment.
+           (us (with-remote-objects (pyeval vertices "[1:] - "vertices "[:-1]")))
+           (ls (with-remote-objects (pyeval "numpy.hypot(*" us ".T)"))))
+      ;; Results in 0/0 for repeated consecutive points.
+      (pyexec (format nil "with numpy.errstate(invalid=\"ignore\"):~%   ")
+              us "/= " ls "[:, None]")
+
+      ;; Vectors from each vertex to the event
+      (let (;; Vectors from each vertex to the event.
+            (vs (with-remote-objects (pyeval xy " - " vertices "[:-1]")))
+            (dot (with-remote-objects (pyeval 0))))
+
+        ;; Clipped dot products -- `einsum` cannot be done in place, `clip` can.
+        ;; `clip` can trigger invalid comparisons if there are nan points.
+        (pyexec (format nil "with numpy.errstate(invalid=\"ignore\"):~%   ")
+                dot " = numpy.clip(numpy.einsum(\"ij,ij->i\", " vs ", " us "), 0, " ls ")")
+
+        (let* (;; Projections.
+               (projs (with-remote-objects (pyeval vertices "[:-1] + " dot "[:, None] * " us)))
+               (ds (with-remote-objects (pyeval "numpy.hypot(*( " xy " - " projs ").T)"))))
+          (pyexec ds "["mt_idxs"[1:] - 1] = numpy.nan")
+
+          (let* ((argmin (pyeval "numpy.nanargmin(" ds ")"))
+                 ;; Python error: Input values must have shape (N, 2) or (2,)
+                 (domain-coordinates (pyeval artist ".axes.transData.inverted().transform(" projs "[" argmin "])"))
+                 (index (pyeval "((" argmin " + " dot "[" argmin "] / " ls "[" argmin "]) / (" path "._interpolation_steps / " tpath "._interpolation_steps))")))
+            (make-selection
+             :artist (artist-from-handle axis artist)
+             :click-screen-x screen-x
+             :click-screen-y screen-y
+             :point-screen-x (pyeval projs "[ "argmin" ][0]")
+             :point-screen-y (pyeval projs "[ "argmin" ][1]")
+             :point-index index
+             :domain-coordinates domain-coordinates
+             :distance (pyeval ds "[" argmin "]"))))))))
+
+(defun compute-nearest-line (axis artist x-screen y-screen)
+  "Returns a selection object (or nil). The selection is the projection onto the nearest line to x y
+   screen coordinates. Note that this routine doesn't care about line visibility.  If you don't want
+   to be able to click on invisible lines, guard this with lines-visible-p."
+  (declare (type python-object artist)
+           (type double-float x-screen y-screen))
+  (let ((type (python-object-type artist)))
+    (cond ((string-equal type "<class 'matplotlib.lines.Line2D'>")
+           (compute-projection-pick axis artist (with-remote-objects (pymethod artist "get_path")) x-screen y-screen))
+          ((string-equal type "<class 'matplotlib.image.AxesImage'>")
+           ;; AxesImage doesn't have any lines.
+           nil)
+          (t (warn "compute-nearest-line not implemented for ~s" type)
+             nil))))
+
+(defun compute-pixel-pick (axis artist screen-x screen-y)
+  "Project screen-x and screen-y onto the artist (which should be an AxesImage)
+   to obtain a selection for the artist.
+
+   The `Selection` `index` is returned as a integer."
+  (declare (optimize debug))
+
+  (let* ((extent (pymethod artist "get_extent"))
+         (xmin (aref extent 0))
+         (xmax (aref extent 1))
+         (ymin (aref extent 2))
+         (ymax (aref extent 3)))
+    (when (string-equal "upper" (pyslot-value artist "origin"))
+      (let ((temp ymin))
+        (setf ymin ymax)
+        (setf ymax temp)))
+
+    (let* ((array (with-remote-objects (pymethod artist "get_array")))
+           (array-dim-0 (pyeval array ".shape[0]"))
+           (array-dim-1 (pyeval array ".shape[1]"))
+           (data-extent (with-remote-objects (pyeval "matplotlib.transforms.Bbox([[" xmin ", " ymin "], [" xmax ", " ymax "]])")))
+           (array-extent (with-remote-objects (pyeval "matplotlib.transforms.Bbox([[ 0, 0], [" array-dim-1", " array-dim-0 "]])")))
+           (trans (with-remote-objects (pyeval artist ".get_transform().inverted()")))
+           (trans (with-remote-objects (pyeval trans " + matplotlib.transforms.BboxTransform(boxin=" data-extent ", boxout=" array-extent")")))
+           (point (pymethod trans "transform" (list screen-x screen-y)))
+           (i (aref point 0))
+           (j (aref point 1))
+           (valid-p (and (not (null i))
+                         (< -1 i array-dim-1)
+                         (not (null j))
+                         (< -1 j array-dim-0))))
+      (when valid-p
+        (setf i (truncate i))
+        (setf j (truncate j))
+        (when (< i 0)
+          (setf i 0))
+        (when (>= i array-dim-1)
+          (setf i (- array-dim-1 1)))
+        (when (< j 0)
+          (setf j 0))
+        (when (>= j array-dim-0)
+          (setf j (- array-dim-0 1)))
+        (let* ((value (pyeval array "[" j ", " i "]"))
+               (trans (with-remote-objects (pyeval trans ".inverted()")))
+               ;; The added 0.5 make it so you click the CENTER of the colors.
+               (point-screen (pymethod trans "transform" (list (+ i 0.5) (+ j 0.5))))
+               (point-screen-x (aref point-screen 0))
+               (point-screen-y (aref point-screen 1))
+               (distance (let ((delta-x (- screen-x point-screen-x))
+                               (delta-y (- screen-y point-screen-y)))
+                           (sqrt (+ (* delta-x delta-x) (* delta-y delta-y))))))
+          (make-selection
+           :artist (artist-from-handle axis artist)
+           :click-screen-x screen-x
+           :click-screen-y screen-y
+           :point-screen-x point-screen-x
+           :point-screen-y point-screen-y
+           :point-index (+ i (* array-dim-1 j))
+           :domain-coordinates (vector (+ i xmin) (+ j ymin) value)
+           :distance distance))))))
+
+(defun compute-nearest-pixel (axis artist x-screen y-screen)
+  "Returns a selection object (or nil). The selection is the projection onto the nearest image to x y
+   screen coordinates. Note that this routine doesn't care about image visibility.  If you don't want
+   to be able to click on invisible images, guard this with image-visible-p."
+  (declare (type python-object artist)
+           (type double-float x-screen y-screen))
+  (let ((type (python-object-type artist)))
+    (cond ((string-equal type "<class 'matplotlib.image.AxesImage'>")
+           (compute-pixel-pick axis artist x-screen y-screen))
+          ((string-equal type "<class 'matplotlib.lines.Line2D'>")
+           ;; Line2D doesn't have images.
+           nil)
+          (t (warn "compute-nearest-pixel not implemented for ~s" type)
+             nil))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Data Cursors
+;;
+;; Data cursors are callouts associated with a line, but they're not user specified like tooltips.
+;; They're dynamically created and point to a position on the line (and not necessarily a point on
+;; the line). They're used to get the exact coordinates from a plot.
+;;
+;; Because they're not limited to points, their their point-indexes are not whole numbers like they
+;; are for tooltips; The point-index 0.5 is exactly halfway between the first and second point on
+;; the line.  1.5 is halfway between the second and third point on the line, and so on.
+
+(defvar *data-cursors* (make-hash-table :weakness :key)
+  "A weakly keyed hashtable of artist -> list of (cons point-index annotation), kept sorted by point index.")
+
+(defun data-cursor-near (artist point-index &key (tol 0.1d0))
+  "Find a data cursor within tol of the specified point-index."
+  (loop :with best-data-cursor = nil
+        :with smallest-distance = 1d20
+        :for prior-distance = 1d20 :then dist
+        :for ((idx . data-cursor) . rest) :on (gethash artist *data-cursors*)
+        :for dist = (abs (- idx point-index))
+        :do (when (and (< dist smallest-distance)
+                       (not (annotation-closed-p data-cursor)))
+              (setf smallest-distance dist)
+              (setf best-data-cursor data-cursor))
+        ;; Since the data is sorted, once distances start becoming greater we can stop.
+        :until (and (> dist prior-distance)
+                    (not (annotation-closed-p data-cursor)))
+        :finally (when (< smallest-distance tol)
+                   (return-from data-cursor-near best-data-cursor))))
+
+
+(defun coordinates-from-point-index (artist point-index)
+  (declare (type (or fixnum double-float) point-index)
+           (type artist artist))
+  (let ((num-points (artist-num-points artist)))
+    (when (< -1 point-index num-points)
+      (let ((x 0d0)
+            (y 0d0)
+            (type (python-object-type (artist-handle artist))))
+        (cond ((string-equal type "<class 'matplotlib.lines.Line2D'>")
+               (multiple-value-bind (int fractal) (truncate point-index)
+                 (cond ((zerop fractal) ;; This path taken by date-time axis.
+                        (setf x (pyeval "(" (artist-handle artist) ".get_xdata()[" int "])"))
+                        (setf y (pyeval "(" (artist-handle artist) ".get_ydata()[" int "])")))
+                       (t ;; This path taken by numeric axis.
+                        (setf x (pyeval "(" (artist-handle artist) ".get_xdata()[" int "] * (1.0 - " fractal ")) + (" (artist-handle artist) ".get_xdata()[" (+ int 1) "] * " fractal ")"))
+                        (setf y (pyeval "(" (artist-handle artist) ".get_ydata()[" int "] * (1.0 - " fractal ")) + (" (artist-handle artist) ".get_ydata()[" (+ int 1) "] * " fractal ")")))))
+               (list x y))
+              ((string-equal type "<class 'matplotlib.image.AxesImage'>")
+               (let* ((data (pyeval "numpy.asarray("(artist-handle artist)".get_array())"))
+                      (extent (pymethod (artist-handle artist) "get_extent"))
+                      (xmin (aref extent 0))
+                      ;;(xmax (aref extent 1))
+                      (ymin (aref extent 2))
+                      ;;(ymax (aref extent 3))
+                      (array-dim-1 (array-dimension data 1)))
+                 (multiple-value-bind (y x) (truncate (truncate point-index) array-dim-1)
+                   (list (+ x xmin) (+ y ymin) (aref data y x)))))
+              (t nil))))))
+
+(defun place-data-cursor (artist point-index &optional text)
+  "Put a data-cursor on the artist at the given point-index with the provided text."
+  (declare (type (or null string) text))
+  (declare (type artist artist))
+  (declare (type double-float point-index))
+
+  (when (null text)
+    ;; Compute a selection so that we can build the data-cursor value.
+    (let ((coords (coordinates-from-point-index artist point-index)))
+      (cond (coords
+             (ecase (length coords)
+               (3 (setf text (format nil "X: ~f~%Y: ~f~%Z: ~f" (first coords) (second coords) (third coords))))
+               (2 (setf text (format nil "X: ~f~%Y: ~f" (first coords) (second coords))))))
+            (t
+             (setf text "Couldn't compute coords?")))))
+
+  (when (and (stringp text) (zerop (length text)))
+    ;; Ensure text isn't totally empty. An empty string doesn't render and is very confusing.
+    (setf text " "))
+
+  (multiple-value-bind (xy xytext horizontal-alignment vertical-alignment)
+      (nice-tooltip-location artist point-index)
+    (setf (gethash artist *data-cursors*)
+          (sort
+           (acons point-index
+                  (callout (artist-axis artist) text
+                           xy :artist artist :xytext xytext
+                           :horizontal-alignment horizontal-alignment
+                           :vertical-alignment vertical-alignment)
+                  (remove-if #'annotation-closed-p
+                             (gethash artist *data-cursors*)
+                             :key #'cdr))
+           #'< :key #'car))))
+
+(defun hide-data-cursor (artist data-cursor)
+  (setf (gethash artist *data-cursors*)
+        (sort
+         (remove data-cursor (gethash artist *data-cursors*) :key #'cdr)
+         #'< :key #'car))
+  (remove-annotation data-cursor))
+
+(defun hide-data-cursors (artist &optional (after-index-inclusive 0) before-index-exclusive)
+  "Hide a specific tooltip by point-index."
+  (declare (type artist artist)
+           (type (or (unsigned-byte 32) double-float) after-index-inclusive)
+           (type (or (unsigned-byte 32) double-float null) before-index-exclusive))
+  (loop :for item :in (gethash artist *data-cursors*)
+        :for (point-index . data-cursor) = item
+        :if (or (and (>= point-index after-index-inclusive)
+                     (or (null before-index-exclusive)
+                         (< point-index before-index-exclusive)))
+                (annotation-closed-p data-cursor))
+          :do (remove-annotation data-cursor)
+        :else
+          :collect item :into remaining-items
+        :finally (setf (gethash artist *data-cursors*) remaining-items)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Interactivity Handling
+;;
+;; We want users to be able to open and close, move and resize, legends and tooltips, etc.  To build
+;; this out, Matplotlib gives us events. We have mouse events, keyboard events, etc.  You can
+;; register handlers for these events on individual elements.
+;;
+;; But that's weak sauce. For example, if you only used those handlers you'd "click through"
+;; everything.  Second, when you click and drag, your starting click will trigger on-click logic
+;; that you don't want.  Third, there is no central state tracking, so every element is repeating
+;; similar logic and there is no hope of resolving conflicts (did you mean to select the tooltip, or
+;; click the close button of the legend just above it?). Finally, to show the modified item in it's
+;; new location you'd need to call redraw and that usually takes > 1 second.
+;;
+;; So, we build something more suitable here to support richer interactivity. Interaction both
+;; interprets the low level events which are injected into the queue by python callbacks, and also
+;; provide useful visual feedback at a high frame rate.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defstruct interaction-event
+  "Interaction events are lisp equivalents of python events. Note that the time is
+   as-recorded-by-python and is not the same as get-internal-real-time, even though
+   they're all mapped to INTERNAL-TIME-UNITS. So don't compare python times to lisp
+   times.
+
+   Why do we use the python times? We want to get as close to the actual event time as possible.  So
+   having python attach a timestamp when it sees the event is the most accurate we can be, and
+   noticably more accurate than waiting for the lisp interaction loop (which runs at 20hz) to handle
+   the event and attach a timestamp."
+  (time (error "This time should be provided by Python") :type fixnum :read-only t)
+  (screen-x nil :type double-float :read-only t)
+  (screen-y nil :type double-float :read-only t))
+
+(defstruct (motion (:include interaction-event))
+  "Records a mouse position.")
+
+(defstruct (axis-enter (:include interaction-event))
+  (axis nil :type axis :read-only t))
+
+(defconstant +shift-modifier+ 0)
+(defconstant +ctrl-modifier+ 1)
+(defconstant +alt-modifier+ 2)
+(defconstant +number-of-modifiers+ 3)
+(deftype modifiers () `(simple-array bit (,+number-of-modifiers+)))
+(defun make-modifiers () (make-array +number-of-modifiers+ :element-type 'bit :initial-element 0))
+
+(defstruct (mbutton (:include motion))
+  (axis nil :type axis :read-only t)
+  (button :left :type (member :left :middle :right) :read-only t)
+  (modifiers (make-modifiers) :type modifiers :read-only t))
+
+(defstruct (click (:include mbutton))
+  "Records a single mouse click. When, where and what modifiers.")
+
+(defstruct (release (:include mbutton))
+  "Records a single mouse release. When, where and what modifiers.")
+
+(deftype key () '(member :delete :backspace :escape :left :right :up :down
+                  :home :pageup :pagedown :end :insert :enter
+                  :control :alt :shift
+                  :tab :pause
+                  :f1 :f2 :f3 :f4 :f5 :f6 :f7 :f8 :f9 :f10 :f11 :f12
+                  :a :b :c :d :e :f :g :h :i :j :k :l :m
+                  :n :o :p :q :r :s :t :u :v :w :x :y :z
+                  :/
+                  :*
+                  :-
+                  :+
+                  :. :0 :1 :2 :3 :4 :5 :6 :7 :8 :9
+                  :|\\| :$ :@ :/))
+(defstruct (key-event (:include interaction-event))
+  "Records a key press or release. We don't care about X/Y locations for these."
+  (key nil :type key :read-only t)
+  (modifiers (make-modifiers) :type modifiers :read-only t))
+
+(defstruct (key-press (:include key-event))
+  "A key is pressed.")
+
+(defstruct (key-release (:include key-event))
+  "A key is released.")
+
+(defconstant +interaction-idle-event-period-internal-units+
+  (truncate (* (/ 1.0 20.0) #| seconds |# INTERNAL-TIME-UNITS-PER-SECOND ))
+  "How long between handling idle interaction logic. We want to process this at
+   a high rate so that we can animate the user interface, but over VNC we're probably
+   not going to get more than 20 fps anyway.")
+
+(defstruct interaction
+  "Interaction is the top-level object for plotting.  It handles queues of events, storing animation
+   states, selected objects etc.
+
+   Another important thing it does is the book keeping for UI interactivity; things like determining
+   the users intent (is it a click? a click and drag? Are they trying to pan the screen or move an
+   annotation?). Once the activity is decided, it must be animated to provide visual feedback to the
+   user.
+
+   The basic flow is:
+
+     Python Input Events --->  Lisp Callbacks -+                   Python events trigger lisp callbacks
+                                               |                   that turn the python events into
+               +-------------------+           | (atomic push)     click, release, etc structures
+               |   *interation*    |           |                   and atomically push them onto
+               +-------------------+           |                   the event queue.
+    +--------- | 1. event-quueue   | <---------+
+    |          |                   |
+  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+                  *INTERACTION THREAD*                             Meanwhile, the ever looping interaction
+  - - - - - - - - - - - - - - - - - - - - - - - - - - - - -        thread takes that queue and maintains
+    |          |                   |                               summary variables.
+    +---+----> | 2. input summary  | ---+
+        |      |    prior-click    |    |
+        +--->  |    click          | ---+
+        |      |    release        |    |
+        +--->  |    screen x y     | ---+------+
+               |                   |           |
+               |                   |       (@30 hz)                        Less frequently (15hz), the
+               |                   |           |                           interaction loop deduces from the
+               |                   |      Interpret input                  summary variables clicks, dblclicks,
+               |                   |       summary                         drags, etc, and acts on them by
+               |                   |           |                           updating itself.
+               |                   |      Dispatch -----> double-click
+               |                   |           |          or long click
+               |                   |           |          or single click
+               |                   |           |          or drag start
+               |                   |           |          or drag end
+               | 3. state variable |           |                |
+               |                   | <----->+<-|----read/write->+
+               |                   |        |  |      state
+               |                   | <----->+  |
+               |                   |        |  +---> +----------------+    Finally, and also at 15hz, the
+               |                   | <----->+------> |    Animate     |    interaction thread draws to the
+               |                   |                 +----------------+    screen to communicate what is
+               +-------------------+                                       occurring."
+  ;; 0. This structure has a thread which handles the processing of it.
+  (done-p nil :type boolean :read-only nil)
+  (thread nil :type (or null sb-thread:thread) :read-only nil) ;; runs interaction-loop til done-p = true.
+  (image-cache (make-hash-table :weakness :key :synchronized t) :type hash-table :read-only t) ;; this slot, multithread read/write safe.
+
+  ;; 1. Python callbacks put events (motion, click and release) onto this queue
+  (event-queue nil :type list :read-only nil)
+  (stay-awake-end-time 0 :type fixnum :read-only nil) ;; The system will busy-wait rather than block up to this time. Each event/animation pushes this time later.
+
+  ;; This mutex and waitqueue implement a sort of "side channel" for sleeping the system until an
+  ;; event comes.  It's not a rigorous thread safe thing; events are NOT protected in a manner that
+  ;; guarentees no losses or anything like that.  But it works well in practice because events are
+  ;; "spammy" when the come.  see comments on interaction-blocking-wait-for-events
+  (event-queue-mutex (sb-thread:make-mutex :name "interaction mutex") :type sb-thread:mutex :read-only t)
+  (event-queue-waitqueue (sb-thread:make-waitqueue :name "interaction waitqueue") :type sb-thread:waitqueue :read-only t)  
+
+  ;; 2. Those queued events are summarized in these slots. We record the last two clicks
+  ;; and the last release event in order to distinguish double-clicks and single clicks.
+  ;; We also know the last mouse location and if we seem to be dragging and dropping.
+  (prior-click nil :type (or null click) :read-only nil)
+  (click nil :type (or null click) :read-only nil)
+  (click-lisp-time 0 :type fixnum :read-only nil) ;; the time we saw the click, Lisp side. We can't directly compare python and lisp timestamps, so we need this extra one.
+  (release nil :type (or null release) :read-only nil)
+  (dragging-p nil :type boolean :read-only nil)
+  (screen-x 0d0 :type double-float :read-only nil) ;; last known screenx and screeny
+  (screen-y 0d0 :type double-float :read-only nil)
+  (released-keys nil :type list :read-only nil)
+
+  ;; 3. Knowing the last time we processed allows us to cap drawing and event firing logic to 30
+  ;; times per second.  The slots of step 2 are interpreted to distinguish and dispatch
+  ;; double-click, click, long click, start-of-drag, completion-of-drag.
+  (last-idle-process-time 0 :type fixnum :read-only nil)
+  (animation-queue nil :type list :read-only nil)
+
+  ;; The marked object is set when the mouse clicks. Stored so that the mouse action
+  ;; callbacks can make use of this information
+  (mark-screen-x 0d0 :type double-float :read-only nil)
+  (mark-screen-y 0d0 :type double-float :read-only nil)
+  (mark-item nil :type t :read-only nil)
+
+  (selected-annotations nil :type list :read-only nil)
+  (selected-lines nil :type list :read-only nil)
+  (hover-axis nil :type (or null axis) :read-only nil)
+  (current-hover nil :type t :read-only nil)
+  (previous-hover nil :type t :read-only nil)
+
+  (mode-change-start-screen-x 0d0 :type double-float :read-only nil)
+  (mode-change-start-screen-y 0d0 :type double-float :read-only nil)
+  (mode :normal :read-only nil
+   :type (member :normal :drag-and-drop :selection-rectangle :pan :zoom-to-rectangle)))
+
+(defconstant +double-click-time-internal-time-units+
+  (truncate (* 0.22d0 #| seconds |# INTERNAL-TIME-UNITS-PER-SECOND ))
+  "The maximum amount of time, in INTERNAL-TIME-UNITS, between first clicks and final release for a
+   double click.")
+
+(defconstant +long-click-time-internal-time-units+
+  (truncate (* 0.85d0 #| seconds |# INTERNAL-TIME-UNITS-PER-SECOND ))
+  "The amount of time, in INTERNAL-TIME-UNITS, between click and release for a long click.")
+
+(defconstant +click-maximum-screen-pixel-distance-squared+
+  (coerce (+ (* 4 4) (* 4 4)) 'double-float)
+  "The amount of distance the mouse can travel between click and release and still
+   be treated as a click or double click (and not a click and drag).  Most people can double click
+   without the mouse moving at all.")
+
+(defun interaction/stay-awake (interaction minimum-time)
+  (tagbody :retry
+     (let* ((time (interaction-stay-awake-end-time interaction))
+            (nv (max time minimum-time)))
+       (unless (eq time (sb-ext:compare-and-swap (interaction-stay-awake-end-time interaction) time nv))
+         (go :retry)))))
+
+(defun interaction/queue-event (interaction event)
+  "Thread-safely notify the interaction structure about the event, waking it if necessary."
+  (declare (type interaction-event event)
+           (type interaction interaction))
+  (let ((now (get-internal-real-time)))
+    ;; Note: that events are atomically pushed to the queue, NOT USING the
+    ;; mutex/waitqueue at all. This is by design. See note on interaction-blocking-wait-for-events
+    (sb-ext:atomic-push event (interaction-event-queue interaction))
+    (interaction/stay-awake interaction (+ now INTERNAL-TIME-UNITS-PER-SECOND))
+
+    ;; If the system seemed to be asleep, send a wake up message. But see
+    ;; comment on interaction-blocking-wait-for-events
+    (when (< now (interaction-stay-awake-end-time interaction))
+      (sb-thread:with-mutex ((interaction-event-queue-mutex interaction))
+        (sb-thread:condition-notify (interaction-event-queue-waitqueue interaction))))
+    event))
+
+(defun interaction-blocking-wait-for-events (interaction)
+  "Block until something calls interaction/queue-event.
+
+   This IS NOT protecting the event queue slot and is just a side mechanism for sleeping the
+   interaction loop and re-awakening it when events start coming again.  No guarentees about events
+   delivery, events not being missed, or the wake up signal coming exactly when you'd expect. But
+   since events tend to be spammy (every mouse movement is an event) it so far works well in
+   practice.
+
+   Conversely, using the waitqueue/mutex properly (e.g. to protect the event queue) seemed to really
+   delay the system. I suspect because python callbacks would end up waiting for Lisp threads, and
+   the system chugged (e.g. mouse events wouldn't register immediately, they'd come in a burst after
+   about 5 seconds, followed by another 5 second wait)."
+  (declare (type interaction interaction))
+  (let ((mutex (interaction-event-queue-mutex interaction))
+        (waitqueue (interaction-event-queue-waitqueue interaction)))
+    (sb-thread:with-mutex (mutex)
+      (sb-thread:condition-wait waitqueue mutex))))
+
+(deftype animate-goal ()
+  "The set of ends that an animation can push an interactable element towards."
+  '(member :closed :opened
+    :unselected :selected
+    :unhovered :hovered
+    :unraised :raised))
+
+(defconstant +animation-time-internal-time-units+
+  (truncate (* 0.250d0 #| seconds |# INTERNAL-TIME-UNITS-PER-SECOND ))
+  "The maximum amount of time over which a state change animation occurs (e.g. goes from 0.0 to
+   1.0). We use a fairly slow rate because our FPS over VNC isn't that high.")
+
+(defstruct (animate (:constructor ANIMATE))
+  "Animates are stored in the interaction-animation-queue. They're just a record of
+   what thing is animating towards what state.  The callback is invoked when the animation
+   is finished. These callbacks are called by the interaction loop thread, so it's safe for
+   them to modify any interaction state variables."
+  (started (get-internal-real-time) :type fixnum :read-only t)
+  (towards :open :type animate-goal :read-only t)
+  (annotation-weak-pointer nil :type sb-ext:weak-pointer :read-only t)
+  ;; The callback is called when the animation finishes.
+  (callback nil :type (or null function) :read-only t))
+
+(defun interaction/queue-animation (interaction animation)
+  "Thread-safely notify the interaction structure about the animation, waking it if necessary."
+  (declare (type animate animation)
+           (type interaction interaction))
+  ;; Push the stay-awake time safely out past the animation run time.
+  (interaction/stay-awake interaction (+ (animate-started animation)
+                                         +animation-time-internal-time-units+
+                                         +animation-time-internal-time-units+))
+  (sb-ext:atomic-push animation (interaction-animation-queue interaction)))
+
+(declaim (type interaction *interaction*))
+(defparameter *interaction* (make-interaction)
+  "Current user interaction state. Global singleton, updated in place by callbacks (installed
+   on matplotlib) triggering state-machine transitions on this structure..")
+
+(defun stop-interaction-thread (&optional (interaction *interaction*))
+  "Stop the interactivity thread on the interaction object."
+  (setf (interaction-done-p interaction) t))
+
+(defun start-interaction-thread (&optional (interaction *interaction*))
+  "Start the interactivity thread on the interaction object."
+  (setf (interaction-done-p interaction) nil)
+  (when (or (not (interaction-thread interaction))
+            (not (sb-thread:thread-alive-p (interaction-thread interaction))))
+    ;; Reset the interaction object before starting work upon it.
+    (setf (interaction-event-queue interaction) nil)
+    (setf (interaction-last-idle-process-time interaction) 0)
+    (setf (interaction-prior-click interaction) nil)
+    (setf (interaction-click interaction) nil)
+    (setf (interaction-click-lisp-time interaction) 0)
+    (setf (interaction-thread interaction)
+          (sb-thread:make-thread
+           'interaction-loop
+           :name "cl-matplotlib interaction"
+           :arguments (list interaction *standard-output*))))
+  interaction)
+
+;; Below here are interaction callbacks that are called by matplotlib and modify the global
+;; *interaction* object.  This same set of callbacks is registered on every figure, and they all
+;; modify the same global *interaction* object (but only it's event-queue slot and in a thread safe
+;; way!).  Using the same set of callbacks everywhere is fine, since you only have one mouse cursor
+;; anyway so you can only interact with one figure at a time.
+
+(defun pyevent-axes (location-event)
+  "When a matplotlib python event derives from LocationEvent (and most do), they contain the relevant
+   axes that generated the event. This routine finds the association lisp axes object for the event,
+   or nil if it couldn't be determined."
+  (let* ((figure-number (ignore-errors (pyeval location-event ".inaxes.figure.dockwidget.unique_figure_id")))
+         (figure (and figure-number (get-figure figure-number)))
+         (axis (and figure (axis-from-axis-handle (pyslot-value location-event "inaxes") figure))))
+    axis))
+
+(defun pyevent-mouse-button (py-mouse-event)
+  "Returns nil (if not determinable), :left, :middle, or :right."
+  (let ((string (ignore-errors (pyslot-value py-mouse-event "button.name"))))
+    (cond ((null string) nil)
+          ((string-equal string "LEFT") :left)
+          ((string-equal string "MIDDLE") :middle)
+          ((string-equal string "RIGHT") :right))))
+
+(defun pyevent-modifiers (py-event)
+  (let ((provided-modifiers (pyeval "['shift' in " py-event ".modifiers, 'ctrl' in " py-event ".modifiers, 'alt' in " py-event ".modifiers]"))
+        (modifiers (make-modifiers)))
+    (setf (sbit modifiers +shift-modifier+) (if (elt provided-modifiers 0) 1 0))
+    (setf (sbit modifiers +ctrl-modifier+) (if (elt provided-modifiers 1) 1 0))
+    (setf (sbit modifiers +alt-modifier+) (if (elt provided-modifiers 2) 1 0))
+    modifiers))
+
+(defun pyevent-key (py-event)
+  (let ((key (pyslot-value py-event "key"))
+        (modifiers (make-modifiers))
+        (len nil)
+        (offset 0))
+    (unless (stringp key)
+      (return-from pyevent-key (values nil modifiers)))
+
+    (setf len (length key))
+    (when (string= key "ctrl+" :start1 offset :end1 (min len (+ offset 5)))
+      (setf (sbit modifiers +ctrl-modifier+) 1)
+      (incf offset 5))
+    (when (string= key "alt+" :start1 offset :end1 (min len (+ offset 4)))
+      (setf (sbit modifiers +alt-modifier+) 1)
+      (incf offset 4))
+    (when (string= key "shift+" :start1 offset :end1 (min len (+ offset 6)))
+      (setf (sbit modifiers +shift-modifier+) 1)
+      (incf offset 6))
+
+    ;; Now map the key string to a symbol. We're probably missing many
+    ;; entries here.
+    (macrolet ((is (s) `(string= key ,s :start1 offset))
+               (shift () '(setf (sbit modifiers +shift-modifier+) 1)))
+      (values
+       ;; Order these clauses by likelyhood of occurring.
+       (cond
+         ((is "backspace") :backspace)
+         ((is "delete") :delete)
+         ((is "enter") :enter)
+         ((is "escape") :escape)
+         ((is "home") :home)     ((is "end") :end)
+         ((is "pageup") :pageup) ((is "pagedown") :pagedown)
+
+         ((is "control") :control)
+         ((is "alt") :alt)
+         ((is "shift") :shift)
+
+         ((is "up") :up) ((is "down") :down)
+         ((is "left") :left) ((is "right") :right)
+
+         ((is "f1")       :f1) ((is "f2")       :f2) ((is "f3")       :f3)
+         ((is "f4")       :f4) ((is "f5")       :f5) ((is "f6")       :f6)
+         ((is "f7")       :f7) ((is "f8")       :f8) ((is "f9")       :f9)
+         ((is "f10")     :f10) ((is "f11")     :f11) ((is "f12")     :f12)
+
+         ((is "1")         :1) ((is "2")         :2) ((is "3")         :3)
+         ((is "4")         :4) ((is "5")         :5) ((is "6")         :6)
+         ((is "7")         :7) ((is "8")         :8) ((is "9")         :9)
+
+         ((is "A") (shift) :a) ((is "B") (shift) :b) ((is "C") (shift) :c)
+         ((is "a")         :a) ((is "b")         :b) ((is "c")         :c)
+         ((is "D") (shift) :d) ((is "E") (shift) :e) ((is "F") (shift) :f)
+         ((is "d")         :d) ((is "e")         :e) ((is "f")         :f)
+         ((is "G") (shift) :g) ((is "H") (shift) :h) ((is "I") (shift) :i)
+         ((is "g")         :g) ((is "h")         :h) ((is "i")         :i)
+         ((is "J") (shift) :j) ((is "K") (shift) :k) ((is "L") (shift) :l)
+         ((is "j")         :j) ((is "k")         :k) ((is "l")         :l)
+         ((is "M") (shift) :m) ((is "N") (shift) :n) ((is "O") (shift) :o)
+         ((is "m")         :m) ((is "n")         :n) ((is "o")         :o)
+         ((is "P") (shift) :p) ((is "Q") (shift) :q) ((is "R") (shift) :r)
+         ((is "p")         :p) ((is "q")         :q) ((is "r")         :r)
+         ((is "S") (shift) :s) ((is "T") (shift) :t) ((is "U") (shift) :u)
+         ((is "s")         :s) ((is "t")         :t) ((is "u")         :u)
+         ((is "V") (shift) :v) ((is "W") (shift) :w) ((is "X") (shift) :x)
+         ((is "v")         :v) ((is "w")         :w) ((is "x")         :x)
+         ((is "Y") (shift) :y) ((is "Z") (shift) :z)
+         ((is "y")         :y) ((is "z")         :z)
+
+         ;; Otherwise...
+         (t nil))
+       modifiers))))
+
+(defun interact/button-press (time py-event)
+  "Interaction handler for mouse button presses. Callback called by matplotlib"
+  (when (not (interaction-done-p *interaction*))
+    (let ((axis (pyevent-axes py-event)))
+      (when axis
+        (let ((x (pyslot-value py-event "x"))
+              (y (pyslot-value py-event "y"))
+              (button (or (pyevent-mouse-button py-event)
+                          :left)))
+          ;; We prefer not to lose release events, because things will feel
+          ;; non-responsive if we do. Therefore if we can't interpret the X/Y
+          ;; coordinates on the event, substitute the previous X and Y
+          ;; so we can still have a release event.
+          (unless (numberp x)
+            (setf x (interaction-screen-x *interaction*)))
+          (unless (numberp y)
+            (setf y (interaction-screen-y *interaction*)))
+          (interaction/queue-event
+           *interaction*
+           (make-click
+            :axis axis
+            :button button
+            :time (truncate (* time INTERNAL-TIME-UNITS-PER-SECOND))
+            :modifiers (pyevent-modifiers py-event)
+            :screen-x (coerce (pyslot-value py-event "x") 'double-float)
+            :screen-y (coerce (pyslot-value py-event "y") 'double-float))))))))
+
+(defun interact/button-release (time py-event)
+  "Interaction handler for mouse button releases. Callback called by matplotlib"
+  (when (not (interaction-done-p *interaction*))
+    (let ((axis (pyevent-axes py-event)))
+      (when axis
+        (let ((x (pyslot-value py-event "x"))
+              (y (pyslot-value py-event "y"))
+              (button (or (pyevent-mouse-button py-event)
+                          :left)))
+          ;; We prefer not to lose release events, because things will feel
+          ;; non-responsive if we do. Therefore if we can't interpret the X/Y
+          ;; coordinates on the event, substitute the previous X and Y
+          ;; so we can still have a release event.
+          (unless (numberp x)
+            (setf x (interaction-screen-x *interaction*)))
+          (unless (numberp y)
+            (setf y (interaction-screen-y *interaction*)))
+          (interaction/queue-event
+           *interaction*
+           (make-release
+            :axis axis
+            :button button
+            :time (truncate (* time INTERNAL-TIME-UNITS-PER-SECOND))
+            :modifiers (pyevent-modifiers py-event)
+            :screen-x (coerce (pyslot-value py-event "x") 'double-float)
+            :screen-y (coerce (pyslot-value py-event "y") 'double-float))))))))
+
+(defun interact/motion (time py-event)
+  "Interaction handler for mouse motion. Callback called by matplotlib"
+  (when (not (interaction-done-p *interaction*))
+    (let ((x (pyslot-value py-event "x"))
+          (y (pyslot-value py-event "y")))
+      (when (and (numberp x) (numberp y))
+        (interaction/queue-event
+         *interaction*
+         (make-motion
+          :time (truncate (* time INTERNAL-TIME-UNITS-PER-SECOND))
+          :screen-x (coerce x 'double-float)
+          :screen-y (coerce y 'double-float)))))))
+
+(defun interact/key (constructor time py-event)
+  (when (not (interaction-done-p *interaction*))
+    (multiple-value-bind (key modifiers) (pyevent-key py-event)
+      (when key
+        (let ((x (pyslot-value py-event "x"))
+              (y (pyslot-value py-event "y")))
+          (interaction/queue-event
+           *interaction*
+           (funcall constructor
+                    :time (truncate (* time INTERNAL-TIME-UNITS-PER-SECOND))
+                    :key key
+                    :modifiers modifiers
+                    :screen-x (coerce x 'double-float)
+                    :screen-y (coerce y 'double-float))))))))
+
+(defun interact/key-down (time py-event)
+  (interact/key #'make-key-press time py-event))
+
+(defun interact/key-up (time py-event)
+  (interact/key #'make-key-release time py-event))
+
+(defun interact/enter-axes (time py-event)
+  (when (not (interaction-done-p *interaction*))
+    (let ((axis (pyevent-axes py-event)))
+        (when axis
+          (let ((x (pyslot-value py-event "x"))
+                (y (pyslot-value py-event "y")))
+      (when (and (numberp x) (numberp y))
+        ;; (format *out* "~%Entered axes...")
+        (interaction/queue-event
+         *interaction*
+         (make-axis-enter
+          :time (truncate (* time INTERNAL-TIME-UNITS-PER-SECOND))
+          :axis axis
+          :screen-x (coerce x 'double-float)
+          :screen-y (coerce y 'double-float)))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Interaction high level acts!
+
+(defparameter *actions*
+  '(((:mouse :double :left-click  :line       :shift) #|does|# act!/toggle-line-in-selection)
+    ((:mouse :double :left-click  :line             ) #|does|# act!/deselect act!/select-line)
+    ((:mouse :long   :left-click  :line             ) #|does|# act!/deselect act!/show-data-at-cursor)
+    ((:mouse :single :left-click  :point            ) #|does|# act!/deselect act!/toggle-tooltip)
+    ((:mouse :long   :left-click  :point            ) #|does|# act!/deselect act!/toggle-tooltip)
+    ((:mouse :single :left-click  :image            ) #|does|# act!/deselect act!/toggle-tooltip)
+    ((:mouse :long   :left-click  :image            ) #|does|# act!/deselect act!/toggle-tooltip)
+    ((:mouse :single :left-click  :annotation :shift) #|does|# act!/toggle-annotation-in-selection)
+    ((:mouse :single :left-click  :annotation       ) #|does|# act!/select-annotation)
+    ((:mouse :single :left-click  :emptyspace :shift) #|does|# )
+    ((:mouse :single :left-click  :emptyspace       ) #|does|# act!/deselect)
+    ((:mouse :hover               :annotation       ) #|does|# act!/trigger-hover)
+    ((:mouse :start  :left-drag   :annotation :shift) #|does|# act!/add-annotation-to-selection act!/raise-for-drag-and-drop act!/begin-drag-and-drop)
+    ((:mouse :start  :left-drag   :annotation       ) #|does|# act!/select-annotation act!/raise-for-drag-and-drop act!/begin-drag-and-drop)
+    ((:mouse :start  :left-drag   :emptyspace       ) #|does|# act!/start-select-rectangle)
+    ((:mouse :start  :middle-drag :emptyspace       ) #|does|# act!/start-pan-rectangle)
+    ((:mouse :start  :right-drag  :emptyspace       ) #|does|# act!/start-zoom-rectangle)
+    ((:mouse :end                                   ) #|does|# act!/end-drag-and-drop act!/end-select-rectangle act!/end-pan-rectangle act!/end-zoom-rectangle)
+    ;; ((:mouse :up :scroll                            ) #|does|# act!/zoom-in)
+    ;; ((:mouse :down :scroll                          ) #|does|# act!/zoom-out)
+    ((:keyboard :escape            ) #|does|# act!/cancel-drag-and-drops)
+    ((:keyboard :delete            ) #|does|# act!/delete-selection)
+    ;; ((:keyboard :up                ) #|does|# move-selection-up)
+    ;; ((:keyboard :down              ) #|does|# move-selection-down)
+    ;; ((:keyboard :left        :shift) #|does|# add-to-selection-left)
+    ;; ((:keyboard :right       :shift) #|does|# add-to-selection-right)
+    ;; ((:keyboard :left  :alt        ) #|does|# move-data-cursors-left)
+    ;; ((:keyboard :right :alt        ) #|does|# move-data-cursors-right)
+    ;; ((:keyboard :left              ) #|does|# move-selection-left)
+    ;; ((:keyboard :right             ) #|does|# move-selection-right)
+    ((:keyboard :w     :ctrl       ) #|does|# act!/close-window)
+    ((:keyboard :z     :ctrl :shift) #|does|# act!/redo)
+    ((:keyboard :z     :ctrl       ) #|does|# act!/undo)
+    ((:keyboard :c     :ctrl       ) #|does|# act!/copy)
+    ((:keyboard :x     :ctrl       ) #|does|# act!/cut)
+    ((:keyboard :v     :ctrl       ) #|does|# act!/paste))
+  "The different actions that can be performed by the interaction loop.
+   A list of (action-requirements . functions-to-call) where action-requirements is a list
+   like (:mouse :double :left-click :line).")
+
+(defun actions-match (inputs action-requirements)
+  "Test if the given inputs [a list like (:mouse :double :left-click :line))] matches the
+   action-requirements, which probably came from the *actions* variable."
+  (loop :while (and inputs action-requirements)
+        :when (equalp (pop inputs) (car action-requirements))
+          :do (pop action-requirements))
+
+  ;; Match if action-requirements are all satisified
+  (null action-requirements))
+
+(defun act!/toggle-tooltip (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD HIDE/SHOW THE TOOLTIP AT ~s" (interaction-mark-item interaction))
+  (let ((mark (interaction-mark-item interaction)))
+    (when mark
+      (let* ((point (selection-point-index mark))
+             (artist (selection-artist mark))
+             (tooltip-p (tooltip-defined-p artist point))
+             (visible-p (and tooltip-p (tooltip-visible-p artist point)))
+             (existing-data-cursor (unless tooltip-p
+                                     (setf point (coerce point 'double-float))
+                                     (data-cursor-near artist point))))
+        (cond ((and tooltip-p visible-p)
+               (hide-tooltip artist point))
+              (tooltip-p
+               (show-tooltip artist point))
+              (existing-data-cursor
+               (hide-data-cursor artist existing-data-cursor))
+              (t (place-data-cursor artist point)))))))
+
+(defun act!/deselect (interaction)
+  "Animate the deselection of interaction-selected and set it to nil."
+  (declare (type interaction interaction))
+  (loop :for thing :in (interaction-selected-annotations interaction)
+        :do (interaction/queue-animation
+             interaction
+             (animate
+              :towards :unselected
+              :annotation-weak-pointer (sb-ext:make-weak-pointer thing))))
+  (setf (interaction-selected-annotations interaction) nil)
+  (setf (interaction-selected-lines interaction) nil))
+
+(defun act!/select-annotation (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD SELECT ANNOTATION ~a...." (interaction-mark-item interaction))
+  (setf (interaction-selected-lines interaction) nil)
+  (let* ((prior-selection (interaction-selected-annotations interaction))
+         (annotation (interaction-mark-item interaction))
+         (already-selected (member annotation prior-selection)))
+    (flet ((animate-prior-selection-deselecting ()
+             "Animate the deselection of the prior-selection list. Doesn't update the selections though."
+             (loop :for thing :in prior-selection
+                   :do (interaction/queue-animation
+                        interaction
+                        (animate
+                         :towards :unselected
+                         :annotation-weak-pointer (sb-ext:make-weak-pointer thing))))))
+    (cond (already-selected
+           (setf prior-selection (delete annotation prior-selection))
+           (animate-prior-selection-deselecting)
+           (setf (interaction-selected-annotations interaction) (list (interaction-mark-item interaction))))
+          (t
+           (animate-prior-selection-deselecting)
+           (setf (interaction-selected-annotations interaction) (list (interaction-mark-item interaction)))
+           (interaction/queue-animation
+            interaction
+            (animate
+             :towards :selected
+             :annotation-weak-pointer (sb-ext:make-weak-pointer annotation))))))))
+
+(defun act!/toggle-annotation-in-selection (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD ADD ANNOTATION ~a to selection...." (interaction-mark-item interaction))
+  (let* ((prior-selection (interaction-selected-annotations interaction))
+         (annotation (interaction-mark-item interaction))
+         (already-selected (member annotation prior-selection)))
+    (cond (already-selected
+           (setf (interaction-selected-annotations interaction) (remove annotation (interaction-selected-annotations interaction)))
+           (interaction/queue-animation
+            interaction
+            (animate
+             :towards :unselected
+             :annotation-weak-pointer (sb-ext:make-weak-pointer annotation))))
+          (t
+           (push annotation (interaction-selected-annotations interaction))
+           (interaction/queue-animation
+            interaction
+            (animate
+             :towards :selected
+             :annotation-weak-pointer (sb-ext:make-weak-pointer annotation)))))))
+
+(defun act!/add-annotation-to-selection (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD ADD ANNOTATION ~a to selection...." (interaction-mark-item interaction))
+  (let* ((prior-selection (interaction-selected-annotations interaction))
+         (annotation (interaction-mark-item interaction))
+         (already-selected (member annotation prior-selection)))
+    (unless already-selected
+      (push annotation (interaction-selected-annotations interaction))
+      (interaction/queue-animation
+       interaction
+       (animate
+        :towards :selected
+        :annotation-weak-pointer (sb-ext:make-weak-pointer annotation))))))
+
+(defun  act!/begin-drag-and-drop (interaction)
+  (declare (type interaction interaction))
+  (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+  (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+  (setf (interaction-mode interaction) :drag-and-drop))
+
+(defun act!/raise-for-drag-and-drop (interaction)
+  (declare (type interaction interaction))
+  (loop :for thing :in (interaction-selected-annotations interaction)
+        :do (typecase thing
+              (annotation
+               (interaction/queue-animation
+                interaction
+                (animate
+                 :towards :raised
+                 :annotation-weak-pointer (sb-ext:make-weak-pointer thing)))))))
+
+(defun act!/show-data-at-cursor (interaction)
+  (declare (type interaction interaction))
+  (let ((selection (interaction-mark-item interaction)))
+    (assert (selection-p selection))
+    (let ((existing (data-cursor-near (selection-artist selection)
+                                      (selection-point-index selection))))
+      (cond (existing
+              (hide-data-cursor (selection-artist selection) existing))
+            (t (place-data-cursor
+                (selection-artist selection)
+                (selection-point-index selection)))))))
+
+(defun act!/select-line (interaction)
+  (declare (type interaction interaction))
+  ;; Need to mark this line too.
+  ;; (format t "~%INTERACTION SHOULD ADD LINE ~a to selection...." (interaction-mark-item interaction))
+
+  ;; Deselect all annotations
+  (loop :for annotation :in (interaction-selected-annotations interaction)
+        :do (interaction/queue-animation
+             interaction
+             (animate
+              :towards :unselected
+              :annotation-weak-pointer (sb-ext:make-weak-pointer annotation))))
+  (setf (interaction-selected-annotations interaction) nil)
+
+  ;; Select this line.
+  (setf (interaction-selected-lines interaction) (list (selection-artist (interaction-mark-item interaction)))))
+
+(defun act!/toggle-line-in-selection (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD TOGGLE LINE ~a to selection...." (interaction-mark-item interaction))
+  (let* ((prior-selection (interaction-selected-lines interaction))
+         (line (selection-artist (interaction-mark-item interaction)))
+         (already-selected (member line prior-selection)))
+    (cond (already-selected
+           ;; (format t "~%It's already selected...")
+           (setf (interaction-selected-lines interaction) (remove line (interaction-selected-lines interaction))))
+          (t
+           ;; (format t "~%Should be selected now!")
+           (push line (interaction-selected-lines interaction))))))
+
+;; (defun act!/hide-other-lines (interaction)
+;;   (declare (type interaction interaction))
+;;   (format t "~%INTERACTION SHOULD ALL LINES EXCEPT AT ~s" (interaction-mark-item interaction)))
+
+(defun act!/start-select-rectangle (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD START SELECTION RECTANGLE at ~d,~d"
+  ;;         (interaction-mark-screen-x interaction)
+  ;;         (interaction-mark-screen-y interaction))
+  (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+  (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+  (setf (interaction-mode interaction) :selection-rectangle))
+
+(defun act!/start-pan-rectangle (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD START PAN RECTANGLE at ~d,~d"
+  ;;         (interaction-mark-screen-x interaction)
+  ;;         (interaction-mark-screen-y interaction))
+  (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+  (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+  (setf (interaction-mode interaction) :pan))
+
+(defun act!/start-zoom-rectangle (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD START ZOOM RECTANGLE at ~d,~d"
+  ;;         (interaction-mark-screen-x interaction)
+  ;;         (interaction-mark-screen-y interaction))
+  (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+  (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+  (setf (interaction-mode interaction) :zoom-to-rectangle))
+
+(defun act!/cancel-drag-and-drops (interaction)
+  (declare (type interaction interaction))
+  ;; (format t "~%INTERACTION SHOULD CANCEL ALL DRAG AND DROPS.")
+  (setf (interaction-click interaction) nil)
+  (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+  (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+  (setf (interaction-dragging-p interaction) nil)
+  (setf (interaction-mode interaction) :normal)
+  (when (interaction-hover-axis interaction)
+    (setf (axis-changed-p (interaction-hover-axis interaction)) t)))
+
+(defvar *drag-and-drop-offset-fudge-factor* 0.71d0
+  "Not sure why this fudge factor is needed. But it scales the mouse screen offsets in such a way
+   that adding it to the annotation x/y makes them track correctly.   It could be total nonsense
+   and be invalidated when I change the scale of the plot axis.")
+
+(defun act!/end-drag-and-drop (interaction)
+  (declare (type interaction interaction))
+  (when (eq (interaction-mode interaction) :drag-and-drop)
+    ;; (format t "~%INTERACTION SHOULD END DRAG AND DROP at ~d,~d"
+    ;;         (interaction-mark-screen-x interaction)
+    ;;         (interaction-mark-screen-y interaction))
+    (let ((offset-x (* *drag-and-drop-offset-fudge-factor* (- (interaction-screen-x interaction)
+                              (interaction-mode-change-start-screen-x interaction))))
+          (offset-y (* *drag-and-drop-offset-fudge-factor* (- (interaction-screen-y interaction)
+                              (interaction-mode-change-start-screen-y interaction)))))
+      (setf (interaction-mode interaction) :normal)
+      (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+      (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+
+      (let* ((axis (interaction-hover-axis interaction))
+             (old-positions
+               (loop :for thing :in (interaction-selected-annotations interaction)
+                     :collect (typecase thing
+                                (annotation
+                                 (cons thing (pymethod (annotation-handle thing) "get_position"))))))
+             (new-positions
+               (loop :for (thing . position) :in old-positions
+                     :collect (typecase thing
+                                (annotation
+                                 (cons thing (list (+ (first position) offset-x)
+                                                   (+ (second position) offset-y))))))))
+
+        ;; (format t "~%old: ~s" old-positions)
+        ;; (format t "~%new: ~s" new-positions)
+
+        (flet ((apply-drag-and-drop ()
+                 ;;(format t "~%APPLY DRAG AND DROP.")
+                 (loop :for (thing . position) :in new-positions
+                       :do (typecase thing
+                             (annotation
+                              (pyexec (annotation-handle thing) ".set_position(" position ")")))))
+               (revert-drag-and-drop ()
+                 ;; (format t "~%REVERT DRAG AND DROP.")
+                 (loop :for (thing . position) :in old-positions
+                       :do (typecase thing
+                             (annotation
+                              (pyexec (annotation-handle thing) ".set_position(" position ")"))))))
+          (apply-drag-and-drop)
+          (loop :for (thing . position) :in new-positions
+                :do (interaction/queue-animation
+                     interaction
+                     (animate
+                      :towards :unraised
+                      :annotation-weak-pointer (sb-ext:make-weak-pointer thing))))
+          (push (list #'(lambda ()
+                          (revert-drag-and-drop)
+                          (setf (axis-changed-p axis) t))
+                      #'(lambda ()
+                          (apply-drag-and-drop)
+                          (setf (axis-changed-p axis) t)))
+                *undo*))))))
+
+(defun act!/end-select-rectangle (interaction)
+  (when (eq (interaction-mode interaction) :selection-rectangle)
+    (setf (interaction-mode interaction) :normal)
+    (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+    (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+    ;; (format t "~%INTERACTION SHOULD END SELECTION RECTANGLE at ~d,~d"
+    ;;         (interaction-mark-screen-x interaction)
+    ;;         (interaction-mark-screen-y interaction))
+    ))
+
+(defun act!/end-pan-rectangle (interaction)
+  (declare (type interaction interaction))
+  (when (eq (interaction-mode interaction) :pan)
+    (setf (interaction-mode interaction) :normal)
+    (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+    (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+    ;; (format t "~%INTERACTION SHOULD END PAN RECTANGLE at ~d,~d"
+    ;;         (interaction-mark-screen-x interaction)
+    ;;         (interaction-mark-screen-y interaction))
+    ))
+
+(defun act!/end-zoom-rectangle (interaction)
+  (declare (type interaction interaction))
+  (when (eq (interaction-mode interaction) :zoom-to-rectangle)
+    (setf (interaction-mode interaction) :normal)
+    (setf (interaction-mode-change-start-screen-x interaction) (interaction-screen-x interaction))
+    (setf (interaction-mode-change-start-screen-y interaction) (interaction-screen-y interaction))
+    ;; (format t "~%INTERACTION SHOULD END ZOOM RECTANGLE at ~d,~d"
+    ;;         (interaction-mark-screen-x interaction)
+    ;;         (interaction-mark-screen-y interaction))
+    ))
+
+(defun act!/delete-selection (interaction)
+  "Animate the deselection of interaction-selected-annotations and set it to nil."
+  (map nil 'remove-annotation (interaction-selected-annotations interaction))
+  (setf (interaction-selected-annotations interaction) nil)
+  (map nil 'delete-artist (interaction-selected-lines interaction))
+  (setf (interaction-selected-lines interaction) nil))
+
+(defun act!/trigger-hover (interaction)
+  "Animate the deselection of interaction-selected-annotations and set it to nil."
+  (let ((prior (interaction-previous-hover interaction))
+        (current (interaction-current-hover interaction)))
+    (typecase prior
+      (annotation
+       (unless (annotation-closed-p prior)
+         (interaction/queue-animation
+          interaction
+          (animate
+           :towards :unhovered
+           :annotation-weak-pointer (sb-ext:make-weak-pointer prior))))))
+    (typecase current
+      (annotation
+       (unless (annotation-closed-p current)
+         (interaction/queue-animation
+          interaction
+          (animate
+           :towards :hovered
+           :annotation-weak-pointer (sb-ext:make-weak-pointer current))))))))
+
+(defun act!/close-window (interaction)
+  ;; (format t "~%Closing window: ~s" (axis-figure (interaction-hover-axis interaction)))
+  (when (interaction-hover-axis interaction)
+    (close-figure (axis-figure (interaction-hover-axis interaction)))))
+
+(defun act!/undo (interaction)
+  (declare (ignore interaction))
+  (funcall *undo-callback*))
+
+(defun act!/redo (interaction)
+  (declare (ignore interaction))
+  (funcall *redo-callback*))
+
+(defun act!/copy (interaction)
+  (declare (type interaction interaction)
+           (optimize debug))
+  (let ((axis (interaction-hover-axis interaction)))
+    (funcall *copy-callback*
+             (loop :for artist :in (interaction-selected-lines interaction)
+                   :when (eq (artist-axis artist) axis)
+                     :collect (make-line-copy-from-artist artist))))
+  (format t "~%Copied ~d lines" (length *copied-traces*)))
+
+(defun act!/cut (interaction)
+  (declare (type interaction interaction)
+           (optimize debug))
+  (let ((axis (interaction-hover-axis interaction)))
+    (funcall *copy-callback*
+             (loop :for artist :in (interaction-selected-lines interaction)
+                   :when (eq (artist-axis artist) axis)
+                     :collect (make-line-copy-from-artist artist)))
+    (loop :for artist :in (interaction-selected-lines interaction)
+          :when (eq (artist-axis artist) axis)
+            :collect (delete-artist artist)))
+  (format t "~%Cut ~d lines" (length *copied-traces*)))
+
+(defun act!/paste (interaction)
+  (declare (type interaction interaction)
+           (optimize debug))
+  (declare (ignore interaction))
+  (loop :for line :in *copied-traces*
+        :do (funcall *paste-callback* line))
+  (format t "~%Pasted ~d lines" (length *copied-traces*)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Interaction High Level Utilities
+
+(defun interaction-loop/handle-inputs (interaction inputs)
+  (loop :for (action-requirements . functions) :in *actions*
+        ;; Only one action can match.
+        :when (actions-match inputs action-requirements)
+          :do (progn
+                (loop :for fn :in functions
+                      :do (funcall fn interaction))
+                (return-from interaction-loop/handle-inputs))))
+
+(defun interaction-loop/mark-annotation-under-mouse-pointer (interaction axis screen-x screen-y)
+  "If a point is on top of an annotation returns :annotation and also
+   updates the interaction structure's mark slots (x, y, item) to the found item. Otherwise
+   returns nil and resets the interaction structure's mark slots."
+  (declare (type interaction interaction)
+           (type axis axis)
+           (type double-float screen-x screen-y))
+  (let ((match (find-if #'(lambda (annotation)
+                            (and (not (annotation-closed-p annotation))
+                                 (destructuring-bind (xmin xmax ymin ymax) (annotation-screen-coords annotation)
+                                   ;; (format t "~%CHECK (~a, ~a) to (~a, ~a) vs (~a, ~a)"
+                                   ;;         xmin ymin xmax ymax
+                                   ;;         screen-x screen-y)
+                                   (and (<= xmin screen-x xmax)
+                                        (<= ymin screen-y ymax)))))
+                        (axis-annotations axis))))
+    (cond (match
+            (setf (interaction-mark-screen-x interaction) screen-x)
+            (setf (interaction-mark-screen-y interaction) screen-y)
+            (setf (interaction-hover-axis interaction) axis)
+            (setf (interaction-mark-item interaction) match)
+            :annotation)
+          (t
+           (setf (interaction-mark-screen-x interaction) 0d0)
+           (setf (interaction-mark-screen-y interaction) 0d0)
+           (setf (interaction-mark-item interaction) nil)
+           nil))))
+
+(defun interaction-loop/mark-line-point-under-mouse-pointer (interaction axis screen-x screen-y)
+  "If a point is find near the screen-x screen-y coordinates, returns :point and also
+   updates the interaction structure's mark slots (x, y, item) to the found item. Otherwise
+   returns nil and resets the interaction structure's mark slots."
+  (declare (type interaction interaction)
+           (type axis axis)
+           (type double-float screen-x screen-y))
+  (loop :with closest = nil
+        ;; For the data browser, and generally, the users are far more interested in
+        ;; being able to easily click points. So we make these large.
+        :with closest-distance-pixels = 45
+        :for artist :across (pymethod (axis-handle axis) "get_children")
+        :for selection = (and (points-visible-p artist)
+                              (compute-nearest-point axis artist screen-x screen-y))
+        :when (and selection (< (selection-distance selection) closest-distance-pixels))
+          :do (setf closest selection
+                    closest-distance-pixels (selection-distance selection))
+        :finally (cond (closest
+                        (setf (interaction-mark-screen-x interaction) (selection-point-screen-x closest))
+                        (setf (interaction-mark-screen-y interaction) (selection-point-screen-y closest))
+                        (setf (interaction-hover-axis interaction) axis)
+                        (setf (interaction-mark-item interaction) closest)
+                        (return-from interaction-loop/mark-line-point-under-mouse-pointer :point))
+                       (t (setf (interaction-mark-screen-x interaction) 0d0)
+                          (setf (interaction-mark-screen-y interaction) 0d0)
+                          (setf (interaction-mark-item interaction) nil)
+                          (return-from interaction-loop/mark-line-point-under-mouse-pointer nil)))))
+
+(defun interaction-loop/mark-line-under-mouse-pointer (interaction axis screen-x screen-y)
+  "If a line is find near the screen-x screen-y coordinates, returns :line and also
+   updates the interaction structure's mark slots (x, y, item) to the found item. Otherwise
+   returns nil and resets the interaction structure's mark slots."
+  (declare (type interaction interaction)
+           (type axis axis)
+           (type double-float screen-x screen-y))
+  (loop :with closest = nil
+        :with closest-distance-pixels = 5 ;; must be within 5px to hit anything.
+        :for artist :across (pymethod (axis-handle axis) "get_children")
+        :for projection = (and (lines-visible-p artist)
+                               (compute-nearest-line axis artist screen-x screen-y))
+        :when (and projection (< (selection-distance projection) closest-distance-pixels))
+          :do (setf closest projection
+                    closest-distance-pixels (selection-distance projection))
+        :finally (cond (closest
+                        (setf (interaction-mark-screen-x interaction) (selection-point-screen-x closest))
+                        (setf (interaction-mark-screen-y interaction) (selection-point-screen-y closest))
+                        (setf (interaction-mark-item interaction) closest)
+                        (setf (interaction-hover-axis interaction) axis)
+                        (return-from interaction-loop/mark-line-under-mouse-pointer :line))
+                       (t (setf (interaction-mark-screen-x interaction) 0d0)
+                          (setf (interaction-mark-screen-y interaction) 0d0)
+                          (setf (interaction-mark-item interaction) nil)
+                          (return-from interaction-loop/mark-line-under-mouse-pointer nil)))))
+
+(defun interaction-loop/mark-image-under-mouse-pointer (interaction axis screen-x screen-y)
+  "If an image is near the screen-x screen-y coordinates, returns :image and also
+   updates the interaction structure's mark slots (x, y, item) to the found item. Otherwise
+   returns nil and resets the interaction structure's mark slots."
+  (declare (type interaction interaction)
+           (type axis axis)
+           (type double-float screen-x screen-y))
+  (loop :with closest = nil
+        :with closest-distance-pixels = 50
+        :for artist :across (pymethod (axis-handle axis) "get_children")
+        :for projection = (and (image-visible-p artist)
+                               (compute-nearest-pixel axis artist screen-x screen-y))
+        :when (and projection (< (selection-distance projection) closest-distance-pixels))
+          :do (setf closest projection
+                    closest-distance-pixels (selection-distance projection))
+        :finally (cond (closest
+                        (setf (interaction-mark-screen-x interaction) (selection-point-screen-x closest))
+                        (setf (interaction-mark-screen-y interaction) (selection-point-screen-y closest))
+                        (setf (interaction-mark-item interaction) closest)
+                        (setf (interaction-hover-axis interaction) axis)
+                        (return-from interaction-loop/mark-image-under-mouse-pointer :image))
+                       (t (setf (interaction-mark-screen-x interaction) 0d0)
+                          (setf (interaction-mark-screen-y interaction) 0d0)
+                          (setf (interaction-mark-item interaction) nil)
+                          (return-from interaction-loop/mark-image-under-mouse-pointer nil)))))
+
+(defun interaction-loop/mark-thing-under-mouse-pointer (interaction axis screen-x screen-y)
+  (or
+   (interaction-loop/mark-annotation-under-mouse-pointer
+    interaction
+    axis
+    screen-x
+    screen-y)
+   (interaction-loop/mark-line-point-under-mouse-pointer
+    interaction
+    axis
+    screen-x
+    screen-y)
+   (interaction-loop/mark-line-under-mouse-pointer
+    interaction
+    axis
+    screen-x
+    screen-y)
+   (interaction-loop/mark-image-under-mouse-pointer
+    interaction
+    axis
+    screen-x
+    screen-y)
+   :emptyspace))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Interaction State
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defstruct animation-state
+  "A on screen manipulative (e.g. a tooltip) that can be interacted with has only a limited set of 'states'
+   that it can animate between. So we can encode it as a few floats.
+
+    Close -> Open factor (0.0 = fully closed, 1.0 = fully open)
+    Unselected -> Selected factor (0.0 = fully deselected, 1.0 = fully selected)
+    Unraised -> Raised factor (0.0 = fully unraised, 1.0 = fully raise)
+    hover -> unhovered factor (0.0 = fully unhovered, 1.0 = fully hovered).
+
+   Items should fade in as they're opened.
+   Items borders should brighten as they're selected.
+   Items should raise as they're picked up (e.g. drag and drop)
+    - By scaling up slightly
+    - By gaining a drop shadow
+   Items should brighet as they're hovered."
+  (open 0d0 :type double-float :read-only nil)
+  (select 0d0 :type double-float :read-only nil)
+  (raise 0d0 :type double-float :read-only nil)
+  (hover 0d0 :type double-float :read-only nil))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Interaction loop.
+;;
+;; We have to take the low level events (clicks, releases) and turn them into higher level
+;; constructs (click-and-drags, double clicks, long clicks, short clicks).  These higher level
+;; events will trigger longer running activities, such as maintaining a list of selected objects,
+;; selecting a bunch of objects by region, moving your selections, etc.  And these long running
+;; activities must be animated.
+;;
+;;  1. A newly selected object should glow.
+;;  2. Objects being dragged should be a bit larger, have drop shadows, and follow the mouse cursor.
+;;  3. A collapsing tooltip should animate open and closed
+;;
+;; The interaction loop takes care of all of that.
+
+(defun interaction-loop/handle-double-click (interaction release)
+  "A left button double click on a line hides that line (and all associated annotations). If shift
+   is held it hides all other lines."
+  (declare (type interaction interaction)
+           (type release release))
+  ;; (format t "~%DOUBLE-CLICK @ ~d,~d" (release-screen-x release) (release-screen-y release))
+  (let ((thing (interaction-loop/mark-thing-under-mouse-pointer
+                interaction
+                (release-axis release)
+                (release-screen-x release)
+                (release-screen-y release)))
+        (shift-modifier (= 1 (sbit (release-modifiers release) +shift-modifier+))))
+    (interaction-loop/handle-inputs
+     interaction
+     `(:mouse :double ,(ecase (release-button release)
+                         (:left :left-click)
+                         (:middle :middle-click)
+                         (:right :right-click))
+              ,thing ,@(and shift-modifier '(:shift))))))
+
+(defun interaction-loop/handle-short-click (interaction release)
+  "A left button short click selects the annotation under the cursor. All others are deselected (unless
+   shift is held)."
+  (declare (type interaction interaction)
+           (type release release))
+  ;; (format t "~%SHORT-CLICK @ ~d,~d" (release-screen-x release) (release-screen-y release))
+  (let ((thing (interaction-loop/mark-thing-under-mouse-pointer
+                interaction
+                (release-axis release)
+                (release-screen-x release)
+                (release-screen-y release)))
+        (shift-modifier (= 1 (sbit (release-modifiers release) +shift-modifier+))))
+    (interaction-loop/handle-inputs
+     interaction
+     `(:mouse :single ,(ecase (release-button release)
+                         (:left :left-click)
+                         (:middle :middle-click)
+                         (:right :right-click))
+              ,thing ,@(and shift-modifier '(:shift))))))
+
+(defun interaction-loop/handle-long-click (interaction release)
+  "A left button long click opens a data-cursor on the nearest visible line."
+  (declare (type interaction interaction)
+           (type release release))
+  ;; (format t "~%LONG-CLICK @ ~d,~d" (release-screen-x release) (release-screen-y release))
+  (let ((thing (interaction-loop/mark-thing-under-mouse-pointer
+                interaction
+                (release-axis release)
+                (release-screen-x release)
+                (release-screen-y release)))
+        (shift-modifier (= 1 (sbit (release-modifiers release) +shift-modifier+))))
+    (interaction-loop/handle-inputs
+     interaction
+     `(:mouse :long ,(ecase (release-button release)
+                       (:left :left-click)
+                       (:middle :middle-click)
+                       (:right :right-click))
+              ,thing ,@(and shift-modifier '(:shift))))))
+
+(defun interaction-loop/start-drag (interaction click)
+  "A left button drag started from an annotation selects it (acting like a left click) and moves the annotations.
+   If there is no annotation it creates a selection rectangle.  If the rectangle is going to the right, it
+   selects anything it touches.  If it's going left, it selects only things fully included.  Shift controls
+   if it adds to the current selection.
+
+   A middle button drag will pan the plot.
+
+   A right button drag will create a zoom rectangle. On release the plot will zoom to the selected region.
+
+   In any case, ESCAPE should cancel the action."
+  (declare (type interaction interaction)
+           (type click click))
+  ;; (format t "~%START-DRAG @ ~d,~d" (click-screen-x click) (click-screen-y click))
+  (let ((thing (interaction-loop/mark-thing-under-mouse-pointer
+                interaction
+                (click-axis click)
+                (click-screen-x click)
+                (click-screen-y click)))
+        (shift-modifier (= 1 (sbit (click-modifiers click) +shift-modifier+))))
+    (interaction-loop/handle-inputs
+     interaction
+     `(:mouse :start ,(ecase (click-button click)
+                        (:left :left-drag)
+                        (:middle :middle-drag)
+                        (:right :right-drag))
+              ,thing ,@(and shift-modifier '(:shift))))))
+
+(defun interaction-loop/conclude-drag (interaction release)
+  "What to do when we've resolved low level click releases into a click drag release. The click
+   and release structures have useful metadata -- like axis and location."
+  (declare (type interaction interaction)
+           (type release release))
+  ;; (format t "~%CONCLUDE-DRAG @ ~d,~d -> ~d,~d"
+  ;;         (click-screen-x click)
+  ;;         (click-screen-y click)
+  ;;         (release-screen-x release)
+  ;;         (release-screen-y release))
+  (let (;; None of the handlers for concluding a drag depend on the thing
+        ;; so save some work by not computing it.
+        ;; (thing (interaction-loop/mark-thing-under-mouse-pointer
+        ;;         interaction
+        ;;         (click-axis click)
+        ;;         (click-screen-x click)
+        ;;         (click-screen-y click)))
+        (shift-modifier (= 1 (sbit (release-modifiers release) +shift-modifier+))))
+    (interaction-loop/handle-inputs
+     interaction
+     `(:mouse :end ,(ecase (release-button release)
+                      (:left :left-drag)
+                      (:middle :middle-drag)
+                      (:right :right-drag))
+              ;; ,thing
+              ,@(and shift-modifier '(:shift))))))
+
+(defun interaction-loop/handle-key (interaction key)
+  "A left button double click on a line hides that line (and all associated annotations). If shift
+   is held it hides all other lines."
+  (declare (type interaction interaction)
+           (type key-release key))
+  ;; (format t "~%KEY ~s" key)
+  (let ((shift-modifier (= 1 (sbit (key-release-modifiers key) +shift-modifier+)))
+        (ctrl-modifier (= 1 (sbit (key-release-modifiers key) +ctrl-modifier+)))
+        (alt-modifier (= 1 (sbit (key-release-modifiers key) +alt-modifier+))))
+    (interaction-loop/handle-inputs
+     interaction
+     `(:keyboard ,(key-release-key key)
+                 ,@(and ctrl-modifier '(:ctrl))
+                 ,@(and alt-modifier '(:alt))
+                 ,@(and shift-modifier '(:shift))))))
+
+(defun interaction-loop/hover (interaction)
+  (declare (type interaction interaction))
+  ;; Only annotations can be hovered right now.
+  (when (interaction-hover-axis interaction)
+    (let* ((screen-x (interaction-screen-x interaction))
+           (screen-y (interaction-screen-y interaction))
+           (axis (interaction-hover-axis interaction))
+           ;; It would be better to do this with a single python call...
+           (hovered (find-if #'(lambda (annotation)
+                                 (and (not (annotation-closed-p annotation))
+                                      (destructuring-bind (xmin xmax ymin ymax) (annotation-screen-coords annotation)
+                                        ;; (format t "~%CHECK (~a, ~a) to (~a, ~a) vs (~a, ~a)"
+                                        ;;         xmin ymin xmax ymax
+                                        ;;         screen-x screen-y)
+                                        (and (<= xmin screen-x xmax)
+                                             (<= ymin screen-y ymax)))))
+                             (axis-annotations axis))))
+      (unless (eq (interaction-current-hover interaction) hovered)
+        (setf (interaction-previous-hover interaction) (interaction-current-hover interaction))
+        (setf (interaction-current-hover interaction) hovered)
+        (interaction-loop/handle-inputs
+         interaction
+         `(:mouse :hover :annotation))))))
+
+(defun interaction-loop/decode-and-trigger-input (interaction now)
+  (let ((prior (interaction-prior-click interaction))
+        (click (interaction-click interaction))
+        (click-lisp-time (interaction-click-lisp-time interaction))
+        (release (interaction-release interaction)))
+
+    (cond (;; Test for a double click
+           (and release prior click
+                ;; Same button
+                (eq (release-button release) (click-button click))
+                (eq (release-button release) (click-button prior))
+                ;; Time constaint
+                (< (- (release-time release) (click-time prior))
+                   +double-click-time-internal-time-units+)
+                (let ((dx (- (release-screen-x release)
+                             (click-screen-x prior)))
+                      (dy (- (release-screen-y release)
+                             (click-screen-y prior))))
+                  ;; Pixel movement constraint.
+                  (< (+ (* dx dx) (* dy dy)) +click-maximum-screen-pixel-distance-squared+)))
+
+           (setf (interaction-hover-axis interaction) (release-axis release))
+           (setf (interaction-click interaction) nil)
+           (setf (interaction-click-lisp-time interaction) 0)
+           (setf (interaction-prior-click interaction) nil)
+           (setf (interaction-release interaction) nil)
+           (interaction-loop/handle-double-click
+            interaction release))
+          (;; Test for a single-click (long or short)
+           (and release click
+                ;; Same button
+                (eq (release-button release) (click-button click))
+                (let ((dx (- (release-screen-x release)
+                             (click-screen-x click)))
+                      (dy (- (release-screen-y release)
+                             (click-screen-y click))))
+                  ;; Pixel movement constraint.
+                  (< (+ (* dx dx) (* dy dy)) +click-maximum-screen-pixel-distance-squared+))
+                ;; Too long for a double click.
+                (> (- now click-lisp-time)
+                   +double-click-time-internal-time-units+))
+           (setf (interaction-hover-axis interaction) (release-axis release))
+           (setf (interaction-click interaction) nil)
+           (setf (interaction-click-lisp-time interaction) 0)
+           (setf (interaction-prior-click interaction) nil)
+           (setf (interaction-release interaction) nil)
+           (if (< (- (release-time release) (click-time click))
+                  +long-click-time-internal-time-units+)
+               (interaction-loop/handle-short-click
+                interaction release)
+               (interaction-loop/handle-long-click
+                interaction release)))
+          (;; Test for starting a click and drag
+           (and (not release)
+                click
+                (not (interaction-dragging-p interaction))
+                (let ((dx (- (interaction-screen-x interaction)
+                             (click-screen-x click)))
+                      (dy (- (interaction-screen-y interaction)
+                             (click-screen-y click))))
+                  (> (+ (* dx dx) (* dy dy)) +click-maximum-screen-pixel-distance-squared+)))
+           (setf (interaction-hover-axis interaction) (click-axis click))
+           (setf (interaction-dragging-p interaction) t)
+           (interaction-loop/start-drag
+            interaction click))
+          )
+
+    ;; Test for completing a click and drag
+    (when (and release (interaction-dragging-p interaction))
+      (setf (interaction-hover-axis interaction) (release-axis release))
+      (setf (interaction-click interaction) nil)
+      (setf (interaction-click-lisp-time interaction) 0)
+      (setf (interaction-prior-click interaction) nil)
+      (setf (interaction-release interaction) nil)
+      (setf (interaction-dragging-p interaction) nil)
+      (interaction-loop/conclude-drag
+       interaction ;; click
+       release))
+
+    ;; Handle hovering
+    (interaction-loop/hover interaction)
+
+    ;; Handle key releases
+    (loop :for release :in (interaction-released-keys interaction)
+          :do (interaction-loop/handle-key interaction release))
+    (setf (interaction-released-keys interaction) nil)))
+
+(defun interaction-loop/handle-event-queue-item (interaction event)
+  (etypecase event
+    (click
+     ;; Currently stored click moves to prior click if it's very recent.
+     (setf (interaction-prior-click interaction)
+           (when (and (interaction-click interaction)
+                      ;; only left double clicks.
+                      (eq :left (click-button event))
+                      (eq :left (click-button (interaction-click interaction)))
+
+                      ;; Occured within double-click time limit.
+                      (< (- (click-time event) (click-time (interaction-click interaction)))
+                         +double-click-time-internal-time-units+))
+             (interaction-click interaction)))
+
+     ;; This new click becomes the stored click.
+     (setf (interaction-release interaction) nil)
+     (setf (interaction-screen-x interaction) (click-screen-x event))
+     (setf (interaction-screen-y interaction) (click-screen-y event))
+     (setf (interaction-click interaction) event)
+     (setf (interaction-click-lisp-time interaction) (get-internal-real-time)))
+    (release
+     (setf (interaction-release interaction) event)
+     (setf (interaction-screen-x interaction) (release-screen-x event))
+     (setf (interaction-screen-y interaction) (release-screen-y event)))
+    (key-press
+     ;; We generally don't do anything on the key-press, but on the key-release instead.
+     ;; (format t "~%Ignoring ~s" event)
+     (setf (interaction-screen-x interaction) (key-press-screen-x event))
+     (setf (interaction-screen-y interaction) (key-press-screen-y event)))
+    (key-release
+     (push event (interaction-released-keys interaction))
+     (setf (interaction-screen-x interaction) (key-release-screen-x event))
+     (setf (interaction-screen-y interaction) (key-release-screen-y event)))
+    (motion
+     (setf (interaction-screen-x interaction) (motion-screen-x event))
+     (setf (interaction-screen-y interaction) (motion-screen-y event)))
+    (axis-enter
+     (setf (interaction-hover-axis interaction) (axis-enter-axis event))
+     (setf (interaction-screen-x interaction) (axis-enter-screen-x event))
+     (setf (interaction-screen-y interaction) (axis-enter-screen-y event)))
+     ))
+
+(defvar *debug-interaction-loop* nil
+  "Defaults to nil: suppress python errors that occur during the interaction loop.
+
+   If set to T and the interaction loop will halt on python-errors. Otherwise it'll suppress them.
+
+   Suppressing errors is usually appreciated.. The errors tend to be things like use-after-free of a
+   plot that was closed but Lisp still having some reference to it (e.g. in animations, in
+   selections).
+
+   We could harden it up, but I (Warren) suspect that's not better than ignoring the occasional
+   problem, and a lot more work.")
+
+(defun interaction-loop/process-queue (interaction now queue)
+  "This is the main queue processing body of the interaction loop. I pulled it out of interaction-loop
+   to allow easier development (e.g. you can just re-evaluate it and see your changes.)"
+  ;; Always, process all the queued up events from python. These will modify state on the
+  ;; interaction object so that interaction-loop/handle-event-state can function.
+  (loop :for event :in queue
+        :do (interaction-loop/handle-event-queue-item interaction event))
+
+  ;; The python events modified slots on the interaction object. Now
+  ;; we can look at those modifications and determine / trigger higher order
+  ;; interactions (e.g. double click events, click and drag events, in the context
+  ;; of what's on the screen to interact with.
+  (interaction-loop/decode-and-trigger-input interaction now)
+
+  ;; Process active animations to produce a set of animation states
+  ;; that can be applied to the annotation.
+  (let* ((animation-states nil)
+         (animations (interaction-animation-queue interaction))
+         (done-animations
+           (loop :for animation :in animations
+                 :for annotation = (sb-ext:weak-pointer-value (animate-annotation-weak-pointer animation))
+                 :for factor = (max 0d0 (min 1d0 (coerce (/ (- now (animate-started animation)) +animation-time-internal-time-units+) 'double-float)))
+                 :when annotation
+                   :do (let ((state (cdr (find annotation animation-states :key #'car))))
+                         (unless state
+                           ;; Build the new initial state for the animation.  Basically a
+                           ;; heuristic based on the goal... assume we started from the opposite
+                           ;; place.
+                           (setf state (make-animation-state :open 1d0)) ;; assume open.
+                           (when (member annotation (interaction-selected-annotations interaction))
+                             (setf (animation-state-select state) 1d0))
+                           (when (eq annotation (interaction-current-hover interaction))
+                             (setf (animation-state-hover state) 1d0))
+                           (case (animate-towards animation)
+                             (:opened (setf (animation-state-open state) 0d0))
+                             (:unselected (setf (animation-state-select state) 1d0))
+                             (:unhovered (setf (animation-state-hover state) 1d0))
+                             (:unraise (setf (animation-state-raise state) 1d0)))
+                           (push (cons annotation state) animation-states))
+
+                         ;; Update the animation state with the progress of this animation. Most
+                         ;; recent animation wins (Animations are stored oldest to newest).
+                         (ecase (animate-towards animation)
+                           (:opened (setf (animation-state-open state) factor))
+                           (:closed (setf (animation-state-open state) (- 1d0 factor)))
+                           (:selected (setf (animation-state-select state) factor))
+                           (:unselected (setf (animation-state-select state) (- 1d0 factor)))
+                           (:hovered (setf (animation-state-hover state) factor))
+                           (:unhovered (setf (animation-state-hover state) (- 1d0 factor)))
+                           (:raised (setf (animation-state-raise state) factor))
+                           (:unraised (setf (animation-state-raise state) (- 1d0 factor)))))
+                 :when (or (null annotation) (>= factor 1.0d0))
+                   :collect animation)))
+    ;; Thread-safely update the animation queue to remove finished animations.
+    (loop :for animation-queue = (interaction-animation-queue interaction)
+          :for new-animation-queue = (sort (set-difference animation-queue done-animations) #'< :key #'animate-started)
+          :until (eq animation-queue (sb-ext:compare-and-swap (interaction-animation-queue interaction) animation-queue new-animation-queue)))
+
+    ;; Apply the animation states to the annotations they belong too.
+    (loop :for (annotation . interaction-state) :in animation-states
+          :for update-fn = (and (annotation-p annotation) (annotation-interaction-update-fn annotation))
+          :when update-fn
+            :do (funcall update-fn annotation interaction-state))
+
+    ;; Handle closed things by calling their callbacks.
+    (loop :for animation :in done-animations
+          :when (animate-callback animation)
+            :do (funcall (animate-callback animation)))
+
+    ;; Redraw any animated Axis using fast blitting.
+    ;; https://matplotlib.org/stable/users/explain/animations/blitting.html
+    (let ((animated-axis nil)
+          (must-redraw-axis nil))
+      (loop :for animation :in animations
+            :for annotation = (sb-ext:weak-pointer-value (animate-annotation-weak-pointer animation))
+            :when annotation
+              :do (pushnew (annotation-axis annotation) animated-axis))
+
+      ;; Or if we're dragging and dropping, we must draw.
+      (when (eq (interaction-mode interaction) :drag-and-drop)
+        (loop :for selected :in (interaction-selected-annotations interaction)
+              :when (annotation-p selected)
+                :do (pushnew (annotation-axis selected) animated-axis)))
+
+      ;; The the legend was clicked, treat that as the axis has been changed.
+      (when (and *legend-clicked-force-redraw-p* (interaction-hover-axis interaction))
+        (setf (axis-changed-p (interaction-hover-axis interaction)) t)
+        (setf *legend-clicked-force-redraw-p* nil))
+
+      ;; If the annotation seems to need a redraw, we must draw.
+      (when (and (interaction-hover-axis interaction)
+                 (let ((axis (interaction-hover-axis interaction))
+                       (cached nil))
+                   (or (axis-changed-p axis)
+                       (null (setf cached (gethash axis (interaction-image-cache interaction))))
+                       (not (eq (car cached) (axis-properties-hash axis))))))
+        (pushnew (interaction-hover-axis interaction) animated-axis))
+
+      ;; If the axis has artists, check the selection state matches the artist
+      ;; highlight state.  If they don't match, fix it, and force a redraw.
+      (when (interaction-hover-axis interaction)
+        (let ((needs-highlight-added
+                (remove-if #'artist-highlighted-p
+                           (interaction-selected-lines interaction)))
+              (needs-highlight-removed
+                (remove-if #'(lambda (artist)
+                               (or (not (artist-highlighted-p artist))
+                                   (member artist (interaction-selected-lines interaction))))
+                           (axis-artists (interaction-hover-axis interaction)))))
+          (assert (null (intersection needs-highlight-added needs-highlight-removed)))
+          (map nil #'artist-highlight needs-highlight-added)
+          (map nil #'artist-unhighlight needs-highlight-removed)
+          (when (or needs-highlight-added needs-highlight-removed)
+            (pushnew (interaction-hover-axis interaction) animated-axis)
+            (pushnew (interaction-hover-axis interaction) must-redraw-axis))))
+
+      (loop :for axis :in animated-axis
+            :for axis-handle = (axis-handle axis)
+            :for figure-handle = (figure-handle (axis-figure axis))
+            ;; Redraw the plot from cache, caching if needed.
+            :do (tagbody
+                   (handler-bind ((PY4CL2:PYERROR
+                                    #'(lambda (python-error)
+                                        (declare (ignore python-error))
+                                        ;; For most users, popping a debugger on a cryptic python error is
+                                        ;; not appreciated during plotting. Better to suppress them.
+                                        ;;
+                                        ;; If you're trying to debug something,
+                                        ;;   (setf *debug-interaction-loop* t)
+                                        (when (null *debug-interaction-loop*)
+                                          (go :next-axis)))))
+                     (let ((cached nil)
+                           (hash nil))
+                       (cond ((or ;; Python says the axis has changed.
+                               (member axis must-redraw-axis)
+                               (axis-changed-p axis)
+                               ;; We don't have a saved value.
+                               (null (setf cached (gethash axis (interaction-image-cache interaction))))
+                               ;; Signature change, the car of the saved value is the old hash.
+                               (not (eq (car cached) (setf hash (axis-properties-hash axis)))))
+
+                              ;; When we are drawing for the background cached image, we need to take
+                              ;; full control and prevent others from redrawing during this time.
+                              ;; To do that we *suppress-redraw*, hide all the annotations, immediately
+                              ;; trigger a draw, then save the draw.
+                              ;;
+                              ;; The unwind protect here ensures that we turn off *suppress-redraw* and
+                              ;; reshow the annotations.
+                              (setf *suppress-redraw* t)
+                              (unwind-protect
+                                   (progn
+                                     ;; Disable all the annotations.
+                                     (dolist (annotation (axis-annotations axis))
+                                       (pymethod (annotation-handle annotation) "set_visible" nil))
+                                     (setf (axis-changed-p axis) nil)
+
+                                     ;; FORCE the redraw, bypassing *suppress-redraw*
+                                     (pyeval (figure-handle (axis-figure axis)) ".canvas.draw()")
+
+                                     (setf (gethash axis (interaction-image-cache interaction))
+                                           (cons hash
+                                                 (pymethod figure-handle "canvas.copy_from_bbox"
+                                                           (pyslot-value axis-handle "bbox")))))
+                                ;; Reenable all the annotations and then allow drawing again.
+                                (dolist (annotation (axis-annotations axis))
+                                  (pymethod (annotation-handle annotation) "set_visible" t))
+                                (setf *suppress-redraw* nil)))
+                             (t (pyexec figure-handle ".canvas.restore_region(" (cdr cached) ")"))))
+
+                     ;; Draw the annotations.
+                     ;; Note: the drawing order is in order of position in axis-annotations.
+                     (dolist (annotation (axis-annotations axis))
+                       (unless (annotation-closed-p annotation)
+                         ;; Set the location if it's drag and drop...
+                         ;;(when (eq (interaction-mode interaction) :drag-and-drop)
+                         (let ((offset-x 0)
+                               (offset-y 0))
+                           (case (interaction-mode interaction)
+                             (:drag-and-drop
+                              (when (member annotation (interaction-selected-annotations interaction))
+                                ;; The -5 and +5 here offset the drop box to account for the drop
+                                ;; shadow.  When you release the drag and drop, the box falls exactly
+                                ;; where the shadow lay.
+                                ;;
+                                ;; The multiply by .71 is a fudge factor. Not sure why it's needed.
+                                (setf offset-x (+ -5 (* *drag-and-drop-offset-fudge-factor* (- (interaction-screen-x interaction)
+                                                                                               (interaction-mode-change-start-screen-x interaction)))))
+                                (setf offset-y (+ 5 (* *drag-and-drop-offset-fudge-factor* (- (interaction-screen-y interaction)
+                                                                                              (interaction-mode-change-start-screen-y interaction))))))))
+                           (pyexec (annotation-handle annotation) ".set_position("
+                                   (annotation-handle annotation) ".get_position() + numpy.asarray((" offset-x ", " offset-y ")))")
+                           (ignore-errors (pyexec axis-handle ".draw_artist(" (annotation-handle annotation) ")"))
+                           (pyexec (annotation-handle annotation) ".set_position("
+                                   (annotation-handle annotation) ".get_position() - numpy.asarray((" offset-x ", " offset-y ")))")
+                           )))
+
+                     ;; Blit it to the screen.
+                     (pyexec figure-handle ".canvas.blit(" figure-handle ".bbox)"))
+                   :next-axis)))))
+
+(defun interaction-loop (&optional (interaction *interaction*) (output *standard-output*))
+  "This is the main loop run by the interaction thread. It handles the event queue (e.g. user input like mouse movement, clicks and keyboard) and animations."
+  (declare (type interaction interaction))
+  (let ((*standard-output* output))
+    (loop :until (interaction-done-p interaction)
+          :for now = (get-internal-real-time)
+          :for delta = (- now (interaction-last-idle-process-time *interaction*))
+          :if (< delta +interaction-idle-event-period-internal-units+)
+            :do (sleep (/ delta INTERNAL-TIME-UNITS-PER-SECOND))
+          :else
+            :do (let ((queue (interaction-event-queue interaction)))
+                  (when (eq queue (sb-ext:compare-and-swap (interaction-event-queue interaction) queue nil))
+                    ;; As we enter here, we've atomically emptied the event-queue and must
+                    ;; now process the events therein:
+                    (interaction-loop/process-queue
+                     interaction
+                     (get-internal-real-time)
+                     (nreverse queue)))
+
+                  ;; Set the last processed time so we don't draw again until the appropriate time.
+                  (setf (interaction-last-idle-process-time *interaction*)
+                        (get-internal-real-time)))
+          :do (when (> now (interaction-stay-awake-end-time interaction))
+                ;; (format t "~%matplotlib interaction thread sleeping...")
+                ;; This will cause us to sleep until new events come in.  It's not rigorously thread safe
+                ;; but seems to work well in practice. See the notes on interaction-blocking-wait-for-events
+                (interaction-blocking-wait-for-events interaction)
+                ;; (format t "~%matplotlib interaction thread waking...")
+                ))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Interactivity Rendering
+;;
+;; Because we're going to be drawing, moving, manipulating a variety of annotations, and we want
+;; that to be fast, what we do is cache the plot after it's drawn and then just draw the annotations
+;; on top. The annotations can be quickly drawn and erased this way, which makes the
+;; whole thing feel responsive.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun interaction-cache-axis-image (axis &key force (interaction *interaction*))
+  ;; Cache the figure... No annotations nor the legend should be visible.
+  ;; If force is true it'll hide and redraw so that it can be cached.
+  (declare (type axis axis)
+           (type boolean force)
+           (type interaction interaction))
+  (let ((figure (axis-figure axis))
+        (annotations (axis-annotations axis)))
+
+    (when (and force annotations)
+      ;; (hide-tooltips axis) ;; TODO this is assuredly wrong right now, but harmless.
+      (setf annotations nil))
+
+    (when (null annotations)
+      (setf (gethash axis (interaction-image-cache interaction))
+            (pymethod (figure-handle figure) "canvas.copy_from_bbox" (pyslot-value (axis-handle axis) "bbox")))
+      t)))
+
+(defun interaction/open-annotation (annotation &key (interaction *interaction*) (callback nil))
+  (interaction/queue-animation
+   interaction
+   (animate
+    ;; Openining an annotation seems to cause a lot of work, so delay the start time
+    ;; a bit so it fades better.
+    :started (+ (get-internal-real-time) (/ INTERNAL-TIME-UNITS-PER-SECOND 2))
+    :towards :opened
+    :annotation-weak-pointer (sb-ext:make-weak-pointer annotation)
+    :callback callback)))
+
+(defun interaction/close-annotation (annotation &key (interaction *interaction*) (callback nil))
+  (interaction/queue-animation
+   interaction
+   (animate
+    :towards :closed
+    :annotation-weak-pointer (sb-ext:make-weak-pointer annotation)
+    :callback callback)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Enable and Disable interactivity:
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defvar *interactivity-callbacks* (make-hash-table :weakness :key)
+  "References from figure -> interactivity callbacks.")
+
+(defun disable-interactivity (&optional (figure *current-figure*))
+  "Disable tooltips on a figure. The callback and all the tooltips are removed."
+  (declare (type figure figure))
+  (stop-interaction-thread)
+  (warn "This should disable interactivity EVERYWHERE on EVERYTHING.")
+  (let ((callbacks (gethash figure *interactivity-callbacks*)))
+    (loop :for (event callback . _) :on callbacks :by #'cddr
+          :do (unregister-callback callback))
+    (remhash figure *interactivity-callbacks*)))
+
+;; These trampoline functions exists because we can ONLY send a function to python as a callback and
+;; not a quoted symbol.  So we send these really simply functions that just call the real
+;; function. This avoids a requirement to re-register callbacks everytime we hotfix them.
+(defun interact/button-press/trampoline (time py-event) (interact/button-press time py-event))
+(defun interact/button-release/trampoline (time py-event) (interact/button-release time py-event))
+(defun interact/motion/trampoline (time py-event) (interact/motion time py-event))
+(defun interact/key-down/trampoline (time py-event) (interact/key-down time py-event))
+(defun interact/key-up/trampoline (time py-event) (interact/key-up time py-event))
+(defun interact/enter-axes/trampoline (time py-event) (interact/enter-axes time py-event))
+(defun install-interactivity (&optional (figure *current-figure*))
+  "Install interactivity callbacks on a figure, disabling/resetting them if already present"
+  (declare (type figure figure))
+  (start-interaction-thread)
+  (setf *register-annotation-callback* #'(lambda (annotation callback)
+                                           (interaction/open-annotation annotation :callback callback)))
+  (setf *remove-annotation-callback* #'(lambda (annotation callback)
+                                         (interaction/close-annotation annotation :callback callback)))
+  (unless (gethash figure *interactivity-callbacks*)
+    (setf (gethash figure *interactivity-callbacks*)
+          (macrolet ((event-callback-plist ()
+                       `(list
+                         ,@(loop :for (event . callback)
+                                   :in '((:button-press-event . #'interact/button-press/trampoline)
+                                         (:button-release-event . #'interact/button-release/trampoline)
+                                         (:motion-notify-event . #'interact/motion/trampoline)
+                                         (:key-press-event . #'interact/key-down/trampoline)
+                                         (:key-release-event . #'interact/key-up/trampoline)
+                                         (:axes-enter-event . #'interact/enter-axes/trampoline))
+                                 :collect event
+                                 :collect `(register-callback
+                                            figure
+                                            ,event
+                                            ,callback)))))
+            (event-callback-plist)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Callouts
 ;;
 ;; A callout is a big yellow box annotation. It has text and points at something.
-;; It deliberately resembles the mplcursor annotations for visual consistency.
 ;;
 ;; Example:
 ;;
@@ -2449,8 +5086,60 @@
                          (setf (gethash "ec" ht) "k")
                          ht)))
 
+(declaim (inline ease-in-quad))
+(defun ease-in-quad (x)
+  "Quadratic Ease-in function"
+  (declare (type double-float x))
+  (* x x))
+
+(declaim (inline ease-out-quad))
+(defun ease-out-quad (x)
+  "Quadratic Ease-out function"
+  (declare (type double-float x))
+  (- 1d0 (* (- 1d0 x) (- 1d0 x))))
+
+(defun callout-animation (annotation animation-state)
+  (let* ((open-factor
+           ;; Don't let the transparency be less than 0.9. If you do, the callout will
+           ;; appear to fade in / fade out.  Which looks cool, but doesn't feel 'snappy'
+           ;; to the user.  Capping it at 0.9 or more makes the callouts 'pop' in a nice
+           ;; way.
+           (max 0.9d0 (animation-state-open animation-state)))
+         (text-factor (ease-out-quad open-factor))
+         (raised (animation-state-raise animation-state))
+         (select-factor (if (> raised 0d0) 1d0 (animation-state-select animation-state)))
+         (hover-factor (animation-state-hover animation-state))
+         (lightness (min 1.0 (+ (* 1.0 select-factor)
+                                (* 0.8 hover-factor))))
+         (bgcolor (list 1.0 1.0 (* 0.8 lightness)))
+         (border-color (list (* 0.8 select-factor)
+                             (* 0.8 select-factor)
+                             (* 0.5 select-factor))))
+    (pyexec (annotation-handle annotation) ".get_bbox_patch().set_color(" border-color ")")
+    (pyexec (annotation-handle annotation) ".set_backgroundcolor(" bgcolor ")")
+    (pyexec (annotation-handle annotation) ".set_alpha(" text-factor ")")
+    (cond ((zerop raised)
+           (pyexec
+            (annotation-handle annotation) ".get_bbox_patch().set_path_effects([matplotlib.patheffects.Normal()])"))
+          (t
+           (pyexec
+            (annotation-handle annotation) ".get_bbox_patch().set_path_effects([matplotlib.patheffects.SimplePatchShadow(offset=(" (* 5.0 raised) ", " (* -5.0 raised) ")), matplotlib.patheffects.Normal()])")))
+    (pyexec (annotation-handle annotation) ".get_bbox_patch().set_alpha(" open-factor ")")))
+
+(defun reparent-annotation-from-axis-to-figure (annotation)
+  "This idea was taken from mplcursors.
+
+   Move the Annotation's ownership from the Axes to the Figure, so that
+   it gets drawn even above twinned axes.  But ann.axes must stay set,
+   so that e.g. unit converters get correctly applied."
+  (unless (annotation-closed-p annotation)
+    (pymethod (annotation-handle annotation) "remove")
+    (pyexec (annotation-handle annotation) ".axes = " (axis-handle (annotation-axis annotation)))
+    (pyexec (figure-handle (axis-figure (annotation-axis annotation))) ".add_artist(" (annotation-handle annotation) ")")
+    (setf (axis-changed-p (annotation-axis annotation)) t)))
+
 (defun callout (axis text xy &rest args
-                &key xytext
+                &key artist xytext
                   horizontal-alignment
                   vertical-alignment
                   z-order
@@ -2465,7 +5154,7 @@
    Example:
      (callout (gca) (format nil \"Two lines~%of text!\") '(0 0) :xytext '(2 -2))"
   (declare (type string text))
-  (declare (ignore xytext
+  (declare (ignore artist xytext
                    horizontal-alignment
                    vertical-alignment
                    z-order
@@ -2473,157 +5162,11 @@
                    textcoords
                    b-box
                    arrow-properties))
-  (apply #'annotate axis text xy
-         (append args *callout-style*)))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Tooltip
-;;
-;; Tooltips are strings (and active annotations) associated with a 'data'. Theoretically the data is
-;; in the matplotlib artist, but we don't have a lisp artist object to hang them from.  So instead
-;; I've put them on the axis. This implementation doesn't support multiple lines on the same axis
-;; with different tooltips, we will need to add that later if desired.
-;;
-;; Example usage:
-;;
-;;  (plot-random-points)
-;;
-;;  ;; Update text and show:
-;;  (setf (tooltip (gca) 3) "Here is a point!")
-;;  ;; Hide it
-;;  (hide-tooltip (gca) 3)
-;;  ;; Show it again
-;;  (tooltip (gca) 3)
-
-(defvar *tooltips* (make-hash-table :weakness :key)
-  "A weakly keyed hashtable of axis -> tooltips structure.")
-(defstruct tooltips
-  "This is a state tracking object. They're weakly keyed on axis
-   via the *tooltips* variable."
-  (strings #() :type simple-vector :read-only nil)
-  (callouts #() :type simple-vector :read-only nil))
-
-(defun axis-num-points (&optional (axis (gca)))
-  (or (pyeval "len(" (axis-handle axis) ".lines) > 0 and isinstance(" (axis-handle axis) ".lines[0], matplotlib.lines.Line2D) and len("(axis-handle axis)".lines[0].get_xdata())")
-      0))
-
-(flet ((resize-vector (vector num-points initial-element)
-         (let ((new (make-array num-points :initial-element initial-element)))
-           (replace new vector)
-           new)))
-  (defun resize-tooltips (tooltips num-points)
-    (declare (type tooltips tooltips))
-    (with-slots (strings callouts) tooltips
-      (when (< (length strings) num-points)
-        (setf strings (resize-vector strings num-points ""))
-        (loop :for i :from num-points :below (length callouts)
-              :when (aref callouts i)
-                :do (remove-annotation (aref callouts i)))
-        (setf callouts (resize-vector callouts num-points nil))))
-    tooltips))
-
-(defun tooltips (axis)
-  "Internal use mainly, returns the tooltips structure after resizing it to
-   match the data points."
-  (let ((tooltips (or (gethash axis *tooltips*)
-                      (setf (gethash axis *tooltips*) (make-tooltips)))))
-    (resize-tooltips tooltips (axis-num-points axis))
-    tooltips))
-
-(defun hide-tooltips (&optional (axis (gca)))
-  "Hides all the tooltips on an axis."
-  (let ((tooltips (gethash axis *tooltips*)))
-    (when tooltips
-      (map nil #'(lambda (v) (and v (remove-annotation v))) (tooltips-callouts tooltips))))
-  (remhash axis *tooltips*))
-
-(defun nice-tooltip-location (axis point-index)
-  "Utility function, Looks at the tooltip data and decides were to place it.
-   Returns (values (x1 y1) (x2 y2) horizontal-alignment vertical-alignment)
-   Assumes that we're using :textcoords \"offset points\" in the callout style
-   so that the text location is screen-points relative to where (x1 y1) are.
-
-   (x1 y1) are the place the tooltip points (e.g. the data point)
-   and (x2 y2) are the location of the callout center where the text is. The
-   text will flow from that point base on the alignment."
-  (let ((x nil)
-        (y nil))
-    (pyexec "tooltip_target = " (axis-handle axis) ".lines")
-    (when (pyeval "len(tooltip_target) > 0  and isinstance(tooltip_target[0], matplotlib.lines.Line2D)")
-      (when (pyeval point-index " < len(tooltip_target[0].get_xdata())")
-        (setf x (pyeval "tooltip_target[0].get_xdata()[" point-index "]"))
-        (setf y (pyeval "tooltip_target[0].get_ydata()[" point-index "]"))))
-    ;; For GC
-    (pyexec "tooltip_target = None")
-    (setf x (or x 0.0))
-    (setf y (or y 0.0))
-    (values
-     (list x y)
-     (list 12 12) ;; Offset in points.
-     "left"
-     "bottom")))
-
-(defun tooltip-visible-p (axis point-index)
-  "Returns T if the tooltip is visible, nil otherwise."
-  (let ((tooltips (tooltips axis)))
-    (when (<= 0 point-index (- (length (tooltips-strings tooltips)) 1))
-      (let ((existing (aref (tooltips-callouts tooltips) point-index)))
-        (and existing
-             (not (annotation-closed-p existing)))))))
-
-(defun tooltip (axis point-index)
-  "Shows (if necessary) and returns the tooltip for the specified point-index."
-  (let ((tooltips (tooltips axis)))
-    ;; Cap the users point to the acceptable range.
-    (assert (<= 0 point-index (- (length (tooltips-strings tooltips)) 1))
-            nil "Tooltip index out of range. You gave ~d, but the range is ~d to ~d (inclusive)."
-            point-index
-            0 (- (length (tooltips-strings tooltips)) 1))
-
-    (let ((existing (aref (tooltips-callouts tooltips) point-index)))
-      (when (or (null existing)
-                (annotation-closed-p existing))
-        (multiple-value-bind (xy xytext horizontal-alignment vertical-alignment)
-            (nice-tooltip-location axis point-index)
-          (let ((string (aref (tooltips-strings tooltips) point-index)))
-            (when (or (null string) (zerop (length string)))
-              ;; At least one space. An empty string doesn't render
-              ;; and is very confusing.
-              (setf string " "))
-            (setf existing
-                  (callout axis string
-                           xy :xytext xytext
-                           :horizontal-alignment horizontal-alignment
-                           :vertical-alignment vertical-alignment))))
-        (setf (aref (tooltips-callouts tooltips) point-index) existing))
-      existing)))
-
-(defun set-tooltip (axis point-index text)
-  "Set a tooltips text, then redraws the tooltip. Supports setf."
-  (declare (type string text))
-  (declare (type axis axis))
-  (declare (type (unsigned-byte 32) point-index))
-  (let ((tooltips (tooltips axis)))
-    (assert (<= 0 point-index (- (length (tooltips-strings tooltips)) 1))
-            nil "Tooltip index out of range. You gave ~d, but the range is ~d to ~d (inclusive)."
-            point-index
-            0 (- (length (tooltips-strings tooltips)) 1))
-    (setf (aref (tooltips-strings tooltips) point-index) text)
-    (let ((existing (aref (tooltips-callouts tooltips) point-index)))
-      (when existing
-        (remove-annotation existing)))
-    (tooltip axis point-index)))
-
-(defsetf tooltip set-tooltip)
-
-(defun hide-tooltip (axis point-index)
-  "Hide a specific tooltip by point-index."
-  (let ((tooltips (tooltips axis)))
-    (when (<= 0 point-index (- (length (tooltips-callouts tooltips)) 1))
-      (let ((existing (aref (tooltips-callouts tooltips) point-index)))
-        (when existing
-          (setf (aref (tooltips-callouts tooltips) point-index) nil)
-          (remove-annotation existing))))))
+  (let ((annotation (apply #'annotate axis text xy
+                           :interaction-update-fn 'callout-animation
+                           (append args *callout-style*))))
+    (reparent-annotation-from-axis-to-figure annotation)
+    annotation))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Tooltip Builder
@@ -2667,7 +5210,9 @@
   (let ((builder (gethash axis *tooltips-builders*)))
     (when builder
       (when (axis-p axis)
-        (let* ((tooltips (tooltips axis))
+        (let* ((artist (mpl/get-artist :ax axis :types '(cl-matplotlib::|matplotlib.lines.Line2D|
+                                                         cl-matplotlib::|matplotlib.image.AxesImage|)))
+               (tooltips (tooltips artist))
                (strings (tooltips-strings tooltips))
                (callouts (tooltips-callouts tooltips)))
           (loop :for i :below (length strings)
@@ -2686,7 +5231,7 @@
                 ;; Colors not working yet. Fix later.
                 ;; :for new-string = (print (format nil "~{~{\bf{~a} \textcolor{blue}{~a}~}~^~%~}"
                 ;;                                  new-string-parts))
-                :for new-string = (format nil "~{~{~a: ~a~}~^~%~}" new-string-parts)
+                :for new-string = (format nil "~{~{~a ~a~}~^~%~}" new-string-parts)
                 :do (setf (aref strings i) new-string)
                 :when (and callout (not (annotation-closed-p callout)))
                   :do (ignore-errors (pymethod (annotation-handle callout) "set_text" new-string)))
@@ -2699,26 +5244,76 @@
       (return-from tooltips-builder (values existing t))))
 
   (let ((builder (make-tooltips-builder)))
-    (setf (tooltips-builder-count builder) 2)
-    (adjust-array (tooltips-builder-labels builder) 2 :fill-pointer 2 :initial-contents '("X" "Y"))
-    (adjust-array (tooltips-builder-data builder) 2 :fill-pointer 2)
-    (adjust-array (tooltips-builder-enabled builder) 2 :fill-pointer 2)
-    (setf (aref (tooltips-builder-enabled builder) 0) t)
-    (setf (aref (tooltips-builder-enabled builder) 1) t)
-
-    ;; Populate the X and Y coordinates at this time.
-    (pyexec "tooltips_builder_target = " (axis-handle axis) ".lines")
-    (when (pyeval "len(tooltips_builder_target) > 0  and isinstance(tooltips_builder_target[0], matplotlib.lines.Line2D)")
-                                        ;(when (pyeval point-index " < len(tooltips_builder_target[0].get_xdata())")
-      (let* ((x (pyeval "tooltips_builder_target[0].get_xdata()"))
-             (y (pyeval "tooltips_builder_target[0].get_ydata()")))
-        (setf (aref (tooltips-builder-data builder) 0) (coerce x 'vector))
-        (setf (aref (tooltips-builder-data builder) 1) (coerce y 'vector)))
-      ;; (format t "~%X and Y: ~s ~s" x y)
-      )
-    (pyexec "tooltips_builder_target = None")
-    (setf (gethash axis *tooltips-builders*) builder)
-    (values builder nil)))
+    (multiple-value-bind (artist type)
+        (mpl/get-artist :ax axis :types '(cl-matplotlib::|matplotlib.lines.Line2D|
+                                          cl-matplotlib::|mpl_toolkits.mplot3d.art3d.Line3D|
+                                          cl-matplotlib::|matplotlib.image.AxesImage|))
+      (cond ((null artist)
+             (format t "~%No line in tooltip builder."))
+            ((eq type 'cl-matplotlib::|mpl_toolkits.mplot3d.art3d.Line3D|)
+             ;; Populate the X, Y and Z coordinates at this time.
+             (setf (tooltips-builder-count builder) 3)
+             (adjust-array (tooltips-builder-labels builder) 3 :fill-pointer 2 :initial-contents '("X" "Y" "Z"))
+             (adjust-array (tooltips-builder-data builder) 3 :fill-pointer 2)
+             (adjust-array (tooltips-builder-enabled builder) 3 :fill-pointer 2)
+             (setf (aref (tooltips-builder-enabled builder) 0) t)
+             (setf (aref (tooltips-builder-enabled builder) 1) t)
+             (setf (aref (tooltips-builder-enabled builder) 2) t)
+             (let* ((data (pyeval (artist-handle artist)".get_data_3d()"))
+                    (x (elt data 0))
+                    (y (elt data 1))
+                    (z (elt data 2)))
+               (setf (aref (tooltips-builder-data builder) 0) (coerce (undisplace-array-if-possible x) 'vector))
+               (setf (aref (tooltips-builder-data builder) 1) (coerce (undisplace-array-if-possible y) 'vector))
+               (setf (aref (tooltips-builder-data builder) 2) (coerce (undisplace-array-if-possible z) 'vector))
+               (format t "~%X and Y and Z:~%~s~% ~s~%~s" x y z)))
+            ((eq type 'cl-matplotlib::|matplotlib.lines.Line2D|)
+             ;; Populate the X and Y coordinates at this time.
+             (setf (tooltips-builder-count builder) 2)
+             (adjust-array (tooltips-builder-labels builder) 2 :fill-pointer 2 :initial-contents '("X" "Y"))
+             (adjust-array (tooltips-builder-data builder) 2 :fill-pointer 2)
+             (adjust-array (tooltips-builder-enabled builder) 2 :fill-pointer 2)
+             (setf (aref (tooltips-builder-enabled builder) 0) t)
+             (setf (aref (tooltips-builder-enabled builder) 1) t)
+             (let* ((x (pyeval "numpy.array("(artist-handle artist)".get_xdata())"))
+                    (y (pyeval "numpy.array("(artist-handle artist)".get_ydata())")))
+               (setf (aref (tooltips-builder-data builder) 0) (coerce (undisplace-array-if-possible x) 'vector))
+               (setf (aref (tooltips-builder-data builder) 1) (coerce (undisplace-array-if-possible y) 'vector))
+               ;; (format t "~%X and Y and Z:~%~s~% ~s" x y)
+               ))
+            ((eq type 'cl-matplotlib::|matplotlib.image.AxesImage|)
+             ;; Populate the X, Y, Z coordinates at this time.
+             (setf (tooltips-builder-count builder) 3)
+             (adjust-array (tooltips-builder-labels builder) 3 :fill-pointer 3 :initial-contents '("X" "Y" "Z"))
+             (adjust-array (tooltips-builder-data builder) 3 :fill-pointer 3)
+             (adjust-array (tooltips-builder-enabled builder) 3 :fill-pointer 3)
+             (setf (aref (tooltips-builder-enabled builder) 0) t)
+             (setf (aref (tooltips-builder-enabled builder) 1) t)
+             (setf (aref (tooltips-builder-enabled builder) 2) t)
+             (let* ((data (pyeval "numpy.asarray("(artist-handle artist)".get_array())"))
+                    (xs nil)
+                    (ys nil)
+                    (zs nil)
+                    (extent (pymethod (artist-handle artist) "get_extent"))
+                    (xmin (aref extent 0))
+                    ;;(xmax (aref extent 1))
+                    (ymin (aref extent 2))
+                    ;;(ymax (aref extent 3))
+                    )
+               (loop :for x :below (array-dimension data 0)
+                     :do (loop :for y :below (array-dimension data 1)
+                               :for z = (aref data x y)
+                               ;; NOTE the x/y transpose in below is intentional.
+                               :do (push (+ y ymin) xs)
+                               :do (push (+ x xmin) ys)
+                               :do (push z zs)))
+               (setf (aref (tooltips-builder-data builder) 0) (coerce (nreverse xs) 'vector))
+               (setf (aref (tooltips-builder-data builder) 1) (coerce (nreverse ys) 'vector))
+               (setf (aref (tooltips-builder-data builder) 2) (coerce (nreverse zs) 'vector))))
+            (t
+             (format t "~%Unknown line type in tooltip builder.")))
+      (setf (gethash axis *tooltips-builders*) builder)
+      (values builder nil))))
 
 (defun reset-tooltips (&optional (axis (gca)))
   (remhash axis *tooltips-builders*)
@@ -2728,7 +5323,7 @@
 (defun set-tooltips (number &key (label nil label-provided-p) (data nil data-provided-p) (axis (gca)))
   "Provide a metadata series by number full of information to the
    tooltip-builder, then redraw the tooltips."
-  (declare (type (or (eql :add) (and fixnum (integer 0))) number))
+  (declare (type (or (eql :add) (unsigned-byte 32)) number))
   (when (or label-provided-p data-provided-p)
     (let ((builder (tooltips-builder axis)))
       (when (eq number :add)
@@ -2742,127 +5337,26 @@
       (when label-provided-p
         (setf (aref (tooltips-builder-labels builder) number) label))
       (when data-provided-p
-        (setf (aref (tooltips-builder-data builder) number) (coerce data 'vector)))
+        (let ((data (etypecase data
+                      (null nil)
+                      (list (coerce data 'vector))
+                      (vector data)
+                      (array
+                       (let ((vector (make-array (array-total-size data))))
+                         (replace vector (make-array (array-total-size data) :displaced-to data))
+                         vector)))))
+          (setf (aref (tooltips-builder-enabled builder) number) (not (null data)))
+          (setf (aref (tooltips-builder-data builder) number) data)))
       (rebuild-tooltips axis))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; MPL Callback
-;;
-;; Matplotlib supports adding events and callbacks. This structure allows registering
-;; lisp callbacks for matplotlib events.
-;;
-;; Example use:
-;;
-;; (defvar *output* *standard-output*)
-;; (register *current-figure*
-;;           :button-press-event
-;;           #'(lambda (&rest args)
-;;               (format *output* "~%BUTTON PRESS: ~s" args)))
-;; (register *current-figure*
-;;           :pick-event
-;;           #'(lambda (&rest args)
-;;               (format *output* "~%PICK: ~s" args)))
 
-(deftype mpl-event () '(member :pick-event :button-press-event))
-(defstruct (mpl-callback (:include moribund))
-  (event nil :type mpl-event :read-only t))
-
-(defun unregister-callback (mpl-callback)
-  (reap (mpl-callback-reaper mpl-callback)))
-
-(defun callback-active-p (mpl-callback)
-  (not (reaped-p (mpl-callback-reaper mpl-callback))))
-
-(defun register-callback (figure event callback-function)
-  "Register an mpl-callback on a figure. Note that it actually is registered
-   on the canvas that backs the figure, but we don't keep references to canvas...
-   just figures."
-  (declare (type figure figure))
-  (declare (type mpl-event event))
-  (declare (type function callback-function))
-  (let* ((canvas (pyslot-value (figure-handle figure) "canvas"))
-         (handle (pymethod canvas "mpl_connect"
-                           (ecase event
-                             (:pick-event "pick_event")
-                             (:button-press-event "button_press_event"))
-                           callback-function))
-         (reaper (make-reaper #'(lambda ()
-                                  (ignore-errors
-                                   (pymethod canvas "mpl_disconnect" handle)))))
-         (callback (make-mpl-callback :event event :reaper reaper)))
-    (dont-fear-the-reaper callback)
-    callback))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Tooltip Integration
-;;
-;; Tooltips are integrated by listening for 'pick' events from matplotlib,
-;; and then annotating the figure with a nice looking tooltip.
-;;
-;; Example:
-;;    (plot-random-points)
-;;    (enable-tooltips)
-;;    ;; click on some things.
-;;
-;;    ;; Add more data to them:
-;;    (set-tooltips 3 :label "Bonus!" :data '(1 2 3 4 5 6 7 8 9 10))
-;;    (disable-tooltips) ;; turn them off.
-
-(defvar *tooltip-callbacks* (make-hash-table :weakness :key)
-  "References from figure -> on click callbacks.")
-
-(defun disable-tooltips (&optional (figure *current-figure*))
-  "Disable tooltips on a figure. The callback and all the tooltips are removed."
-  (declare (type figure figure))
-  (dolist (axis (figure-axes figure))
-    (hide-tooltips axis))
-  (let ((callback  (gethash figure *tooltip-callbacks*)))
-    (when callback
-      (unregister-callback callback)
-      (remhash figure *tooltip-callbacks*))))
-
-(defun toggle-tooltip (axis point-number)
-  "Show/hide a specific tooltip by point-number."
-  (declare (type (unsigned-byte 32) point-number)
-           (type axis axis))
-  (multiple-value-bind (builder exists-p) (tooltips-builder axis)
-    (declare (ignore builder))
-    (unless exists-p (rebuild-tooltips axis))
-    (if (tooltip-visible-p axis point-number)
-        (hide-tooltip axis point-number)
-        (tooltip axis point-number))))
-
-(defun tooltip-callback (python-event)
-  "This is called by Matplotlib whenever the user 'picks' a point. We use it
-   to toggle tooltips."
-  (when (pyeval "isinstance(" python-event " .artist, matplotlib.lines.Line2D)")
-    ;; If wanted, X/Y data can be got this way:
-    ;;(pyexec "xdata = thisline.get_xdata()")
-    ;;(pyexec "ydata = thisline.get_ydata()")
-    (let ((axis (axis-from-axis-handle (pyeval python-event ".artist.axes")))
-          (point-number (elt (pyeval python-event ".ind") 0)))
-      (toggle-tooltip axis point-number))))
-
-(defun tooltip-callback-trampoline (python-event)
-  "This trampoline exists because we can ONLY send a function to python as a callback
-   and not a quoted symbol.  So we send this really simply function that just calls
-   a different function that we can modify at the REPL.  This avoids a requirement
-   to re-register the tooltip callback everytime it's modified."
-  (tooltip-callback python-event))
-
-(defun install-tooltips (&optional (figure *current-figure*))
-  "Install tooltips on the figure, disabling/resetting them if already present"
-  (declare (type figure figure))
-  (disable-tooltips figure)
-  (dolist (axis (figure-axes figure))
-    (rebuild-tooltips axis))
-  (setf (gethash figure *tooltip-callbacks*)
-        (register-callback *current-figure* :pick-event #'tooltip-callback-trampoline))
-  t)
-
-(defun enable-tooltips (&optional (figure *current-figure*))
-  "Enable tooltips on the figure, unless already enabled."
-  (let ((callback (gethash figure *tooltip-callbacks*)))
-    (when (or (null callback)
-              (not (callback-active-p callback)))
-      (install-tooltips))))
+(defun clear-cl-matplotlib-lisp-state ()
+  "Entirely reset Lisp's knowledge of matplotlib. Used for getting a clean state after a reset."
+  (stop-interaction-thread)
+  (clrhash *interactivity-callbacks*)
+  (clrhash *tooltips-builders*)
+  (clrhash *tooltips*)
+  (clrhash *data-cursors*)
+  (setf *interaction* (make-interaction))
+  (clear-figure-tracking))
