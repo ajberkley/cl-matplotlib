@@ -107,6 +107,7 @@ class InteractiveLegend(object):
 
         self.legend_handle_to_axes_handle = self._build_lookups(legend)
         self._setup_connections()
+        self.legend.set_in_layout(False)
 
     def _setup_connections(self):
         for artist in self.legend.texts + self.legend.legend_handles:
@@ -493,6 +494,8 @@ notifier = None # here so we do not get garbage collected
 def start_app (try_process_message):
     global main_window, notifier
     matplotlib.use("QtAgg")
+    # the name "MATLAB 2018B" has to be a match to the string used by AWESOMEWM (or other window manager)
+    # so that the focus is not stolen when a plotting window is created
     app = QtWidgets.QApplication(["MATLAB R2018b"])
     app.setQuitOnLastWindowClosed(False)
     # parameter to QApplication sets WM_CLASS, here I am matching a local

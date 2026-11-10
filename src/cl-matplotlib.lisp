@@ -953,7 +953,7 @@
                    (if (typep children 'sequence)
                        (count-if (lambda (x) (or (pycall "isinstance" x '|matplotlib.lines.Line2D|))) children)
                        0))))
-        (displayname displayname)))
+        (displayname (format nil "~S" displayname))))
 
 (defun plot-errorbar (x x+ x- y y+ y- &key linestyle color (marker "o") markersize ax (label "") markerfacecolor linewidth
                                         markeredgecolor hide-in-legend (picker 5) ecolor gapcolor)
@@ -2237,7 +2237,7 @@
       (* 0.5 area))))
 
 (defun mpl/plot-polygon
-    (exterior &key holes (ax (gca)) facecolor (edgecolor "black")
+    (exterior &key holes (ax (gca)) facecolor (edgecolor "black") (linewidth 1)
                 autoscale-axis (alpha 0.3) (fill (if (equal facecolor "none") nil t)))
   "matplotlib will automatically handle filling correctly if holes go the opposite
  direction of the outside.
@@ -2279,7 +2279,8 @@
                             (map 'list (lambda (x) (list (float (elt x 0) 0d0)
                                                          (float (elt x 1) 0d0))) poly-points))))
         (let* ((path (pycall "matplotlib.path.Path" poly-points all-paths))
-               (patch (pycall "matplotlib.patches.PathPatch" path :facecolor facecolor :edgecolor edgecolor :alpha alpha :fill fill)))
+               (patch (pycall "matplotlib.patches.PathPatch" path :facecolor facecolor :edgecolor edgecolor
+                                                                  :alpha alpha :fill fill :linewidth linewidth)))
           (pymethod (axis-handle ax) "add_patch" patch)))))
   (draw-axis ax)
   (when autoscale-axis
